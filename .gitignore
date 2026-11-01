@@ -2,6 +2,7 @@ prd.md
 trd.md
 CLAUDE.md
 .claude/
+.commandcode/
 backtest/data/
 backtest/.venv/
 /target/
