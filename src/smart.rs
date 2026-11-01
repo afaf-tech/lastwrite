@@ -49,6 +49,7 @@ pub struct Disk {
     pub temperature_c: Option<i64>,
     pub smart_passed: Option<bool>,
     pub attributes: BTreeMap<u32, i64>,
+    pub attribute_names: BTreeMap<u32, String>,
     pub nvme: Option<NvmeHealth>,
 }
 
@@ -119,6 +120,8 @@ struct AtaTable {
 #[derive(Deserialize)]
 struct AtaAttribute {
     id: u32,
+    #[serde(default)]
+    name: String,
     raw: AtaRaw,
 }
 
@@ -151,8 +154,11 @@ pub fn read(device: &ScanDevice) -> Result<Disk, String> {
 }
 
 /// A sleeping drive is fine; `-n standby` makes smartctl skip it.
+/// The wording varies between smartctl versions and platforms, so match it
+/// case-insensitively instead of expecting one exact string.
 pub fn is_asleep(message: &str) -> bool {
-    message.contains("STANDBY") || message.contains("SLEEP")
+    let message = message.to_ascii_lowercase();
+    message.contains("standby") || message.contains("sleep")
 }
 
 pub fn parse(json: &str) -> Result<Disk, String> {
@@ -176,9 +182,19 @@ pub fn parse(json: &str) -> Result<Disk, String> {
         ("ATA", Some(_)) => Kind::Hdd,
         _ => Kind::Unknown,
     };
-    let mut attributes: BTreeMap<u32, i64> = report
+    let (mut attributes, attribute_names): (BTreeMap<u32, i64>, BTreeMap<u32, String>) = report
         .ata_smart_attributes
-        .map(|ata| ata.table.into_iter().map(|a| (a.id, a.raw.value)).collect())
+        .map(|ata| {
+            let mut attributes = BTreeMap::new();
+            let mut names = BTreeMap::new();
+            for attribute in ata.table {
+                attributes.insert(attribute.id, attribute.raw.value);
+                if !attribute.name.is_empty() {
+                    names.insert(attribute.id, attribute.name);
+                }
+            }
+            (attributes, names)
+        })
         .unwrap_or_default();
     if let Some(health) = &report.nvme_smart_health_information_log {
         attributes.insert(NVME_MEDIA_ERRORS_ID, health.media_errors);
@@ -193,6 +209,7 @@ pub fn parse(json: &str) -> Result<Disk, String> {
         temperature_c: report.temperature.map(|t| t.current),
         smart_passed: report.smart_status.map(|s| s.passed),
         attributes,
+        attribute_names,
         nvme: report.nvme_smart_health_information_log,
     })
 }
@@ -216,7 +233,20 @@ mod tests {
         let disk = parse(include_str!("../tests/fixtures/hdd_synthetic.json")).unwrap();
         assert_eq!(disk.kind, Kind::Hdd);
         assert_eq!(disk.attributes[&5], 12);
+        assert_eq!(disk.attribute_names[&5], "Reallocated_Sector_Ct");
         assert_eq!(disk.capacity_bytes, Some(4000787030016));
+    }
+
+    #[test]
+    fn standby_and_sleep_messages_are_asleep() {
+        for message in [
+            "Device is in STANDBY mode, exit(2)",
+            "Device is in standby mode",
+            "device is in sleep mode",
+        ] {
+            assert!(is_asleep(message), "{message}");
+        }
+        assert!(!is_asleep("SMART support is: Unavailable"));
     }
 
     #[test]

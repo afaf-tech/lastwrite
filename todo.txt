@@ -38,7 +38,8 @@ Everything below only reads the drive, except step 5, which spins it down.
     sudo target/release/lastwrite --db /tmp/lastwrite-test.sqlite
 
     Expected: every drive is listed with its correct type and a score.
-    SATA SSDs show "Unknown" for now. That is a known gap.
+    SATA SSDs are scored from their vendor wear attribute (231, 233, 202 or
+    169). A drive with none of those shows "Unknown".
 
 [ ] 7. Test alerts (optional, needs a webhook or Telegram bot)
     export LASTWRITE_WEBHOOK_URL=<your webhook URL>
