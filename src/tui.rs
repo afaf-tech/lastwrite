@@ -533,6 +533,7 @@ mod tests {
                     smart_passed: Some(true),
                     attributes: BTreeMap::new(),
                     attribute_names: BTreeMap::new(),
+                    attribute_values: BTreeMap::new(),
                     nvme: None,
                 },
                 assessment: Assessment {
