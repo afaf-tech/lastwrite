@@ -1,0 +1,20 @@
+{
+  "smartctl": { "exit_status": 0 },
+  "device": { "name": "/dev/sda", "type": "sat", "protocol": "ATA" },
+  "model_name": "SYNTHETIC HDD 4TB",
+  "serial_number": "SYNTH0001",
+  "firmware_version": "TEST01",
+  "user_capacity": { "bytes": 4000787030016 },
+  "rotation_rate": 5400,
+  "smart_status": { "passed": true },
+  "temperature": { "current": 38 },
+  "ata_smart_attributes": {
+    "table": [
+      { "id": 5, "name": "Reallocated_Sector_Ct", "raw": { "value": 12 } },
+      { "id": 9, "name": "Power_On_Hours", "raw": { "value": 31000 } },
+      { "id": 10, "name": "Spin_Retry_Count", "raw": { "value": 0 } },
+      { "id": 197, "name": "Current_Pending_Sector", "raw": { "value": 2 } },
+      { "id": 198, "name": "Offline_Uncorrectable", "raw": { "value": 0 } }
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+prd.md
+trd.md
+CLAUDE.md
+.claude/
+backtest/data/
+backtest/.venv/
+/target/
+secret.txt
+drive.json
+standby.json

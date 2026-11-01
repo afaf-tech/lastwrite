@@ -1,0 +1,14 @@
+[Unit]
+Description=Lastwrite disk health monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/lastwrite daemon --db /var/lib/lastwrite/lastwrite.sqlite
+EnvironmentFile=-/etc/lastwrite/env
+StateDirectory=lastwrite
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,54 @@
+Lastwrite: tests to run on a machine with a real drive
+======================================================
+
+Use a physical machine (Linux or a Proxmox host) with an HDD or SATA SSD.
+A VM won't work: its disk is virtual and has no real SMART data.
+Everything below only reads the drive, except step 5, which spins it down.
+
+[ ] 1. Install the tools
+    sudo apt install smartmontools hdparm
+    Install Rust from https://rustup.rs (if the build fails, also: sudo apt install build-essential)
+
+[ ] 2. Build
+    cargo build --release
+
+[ ] 3. Find the drives
+    sudo smartctl --scan
+
+[ ] 4. Save the raw drive data (replace sda with your drive)
+    sudo smartctl -a -j /dev/sda > drive.json
+
+    Do this once for an HDD and once for a SATA SSD if you have both.
+    Use a different file name for each one, e.g. drive-ssd.json.
+
+[ ] 5. Save the output from a sleeping HDD
+    Only on an HDD that nothing is using right now. Skip this on busy drives.
+    sudo hdparm -y /dev/sda
+    sudo smartctl -a -j -n standby /dev/sda > standby.json
+
+    Expected: the "messages" section mentions STANDBY.
+    If the wording differs, sleeping drives will cause false
+    "stopped responding" alerts, so the code needs changing.
+
+[ ] 6. Run Lastwrite once
+    sudo target/release/lastwrite --db /tmp/lastwrite-test.sqlite
+
+    Expected: every drive is listed with its correct type and a score.
+    SATA SSDs show "Unknown" for now. That is a known gap.
+
+[ ] 7. Test alerts (optional, needs a webhook or Telegram bot)
+    export LASTWRITE_WEBHOOK_URL=<your webhook URL>
+    target/release/lastwrite alert-test
+
+    Expected: "1 channel(s) delivered" and the message arrives.
+
+[ ] 8. Test the daemon (optional)
+    sudo -E LASTWRITE_INTERVAL_SECONDS=60 target/release/lastwrite daemon --db /tmp/lastwrite-test.sqlite
+
+    Leave it for a few minutes, then stop it with Ctrl+C.
+    Expected: "read N drive(s)" each minute, and sleeping drives stay asleep.
+
+[ ] 9. Bring the results back
+    Copy drive.json, standby.json and the output of step 6 into the project folder.
+    The JSON files contain drive serial numbers, so don't commit them.
+    drive.json and standby.json are already in .gitignore.
