@@ -21,6 +21,10 @@ Everything below only reads the drive, except step 5, which spins it down.
     Do this once for an HDD and once for a SATA SSD if you have both.
     Use a different file name for each one, e.g. drive-ssd.json.
 
+    For a USB external drive, add -d sat:
+    sudo smartctl -a -j -d sat /dev/sda > drive.json
+    This needs Linux. On macOS, smartctl can't read USB drives.
+
 [ ] 5. Save the output from a sleeping HDD
     Only on an HDD that nothing is using right now. Skip this on busy drives.
     sudo hdparm -y /dev/sda
