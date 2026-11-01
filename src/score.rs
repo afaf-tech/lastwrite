@@ -47,7 +47,8 @@ pub fn assess(disk: &Disk, worsening: bool) -> Assessment {
     let mut assessment = match disk.kind {
         Kind::Hdd => assess_hdd(disk, worsening),
         Kind::Nvme => assess_nvme(disk, worsening),
-        Kind::SataSsd | Kind::Unknown => unscored(disk),
+        Kind::SataSsd => assess_sata_ssd(disk, worsening),
+        Kind::Unknown => unscored(),
     };
     if disk.smart_passed == Some(false) {
         assessment.score = Some(assessment.score.unwrap_or(FAILING_CAP).min(FAILING_CAP));
@@ -61,28 +62,42 @@ fn attribute(disk: &Disk, id: u32) -> f64 {
     disk.attributes.get(&id).copied().unwrap_or(0).max(0) as f64
 }
 
-fn assess_hdd(disk: &Disk, worsening: bool) -> Assessment {
-    let (reallocated, spindle) = (attribute(disk, 5), attribute(disk, 10));
+struct Damage {
+    points: f64,
+    reasons: Vec<String>,
+}
+
+impl Damage {
+    fn add(&mut self, points: f64, count: f64, what: &str) {
+        if points > 0.0 {
+            self.points += points;
+            self.reasons.push(format!("{count:.0} {what} (-{points:.1})"));
+        }
+    }
+}
+
+/// Sector damage is penalised the same way for HDDs and SATA SSDs.
+fn sector_damage(disk: &Disk) -> Damage {
+    let reallocated = attribute(disk, 5);
     let (pending, uncorrectable) = (attribute(disk, 197), attribute(disk, 198));
     let (low, high) = REALLOC_TIERS;
     let realloc_penalty = reallocated.min(low)
         + (reallocated.min(high) - low).max(0.0) * 0.5
         + (reallocated - high).max(0.0) * 0.2;
 
-    let mut penalty = 0.0;
-    let mut reasons = Vec::new();
-    let mut add = |points: f64, count: f64, what: &str| {
-        if points > 0.0 {
-            penalty += points;
-            reasons.push(format!("{count:.0} {what} (-{points:.1})"));
-        }
-    };
-    add(PENDING_PENALTY * pending, pending, "pending sectors");
-    add(PENDING_PENALTY * uncorrectable, uncorrectable, "uncorrectable sectors");
-    add(realloc_penalty, reallocated, "reallocated sectors");
-    add(if spindle > 0.0 { SPINDLE_PENALTY } else { 0.0 }, spindle, "spin retries");
+    let mut damage = Damage { points: 0.0, reasons: Vec::new() };
+    damage.add(PENDING_PENALTY * pending, pending, "pending sectors");
+    damage.add(PENDING_PENALTY * uncorrectable, uncorrectable, "uncorrectable sectors");
+    damage.add(realloc_penalty, reallocated, "reallocated sectors");
+    damage
+}
 
-    let score = (100.0 - penalty).max(0.0);
+fn assess_hdd(disk: &Disk, worsening: bool) -> Assessment {
+    let mut damage = sector_damage(disk);
+    let spindle = attribute(disk, 10);
+    damage.add(if spindle > 0.0 { SPINDLE_PENALTY } else { 0.0 }, spindle, "spin retries");
+
+    let score = (100.0 - damage.points).max(0.0);
     let tier = if worsening {
         Tier::Critical
     } else if score < WARNING_BELOW {
@@ -92,6 +107,7 @@ fn assess_hdd(disk: &Disk, worsening: bool) -> Assessment {
     } else {
         Tier::Healthy
     };
+    let mut reasons = damage.reasons;
     if worsening {
         reasons.insert(0, "Damage counters rose in the last 7 days".to_string());
     }
@@ -100,7 +116,7 @@ fn assess_hdd(disk: &Disk, worsening: bool) -> Assessment {
 
 fn assess_nvme(disk: &Disk, worsening: bool) -> Assessment {
     let Some(health) = &disk.nvme else {
-        return unscored(disk);
+        return unscored();
     };
     let mut score = 100.0 - (health.percentage_used as f64).min(100.0);
     let mut tier = if score < WARNING_BELOW { Tier::Warning } else { Tier::Healthy };
@@ -131,12 +147,79 @@ fn assess_nvme(disk: &Disk, worsening: bool) -> Assessment {
     Assessment { score: Some(score), tier, reasons }
 }
 
-fn unscored(disk: &Disk) -> Assessment {
-    let reason = match disk.kind {
-        Kind::SataSsd => "SATA SSD wear attributes are not mapped yet",
-        _ => "Drive type is not supported yet",
+/// Vendor SATA SSDs expose remaining endurance under different attribute
+/// names. Every known one is a percentage: the older "remaining" names count
+/// down, while the newer "used" names count up.
+fn wear_used(disk: &Disk) -> Option<f64> {
+    let mut worst: Option<f64> = None;
+    for (id, name) in &disk.attribute_names {
+        let Some(&raw) = disk.attributes.get(id) else { continue };
+        if !(0..=100).contains(&raw) {
+            continue;
+        }
+        let name = name.to_ascii_lowercase();
+        let remaining = name.contains("life_left")
+            || name.contains("wearout_indicator")
+            || name.contains("lifetime_remain")
+            || name.contains("remaining_lifetime")
+            || name.contains("remaining_life");
+        let used = name.contains("rated_life_used")
+            || name.contains("lifetime_used")
+            || name.contains("life_used");
+        let percentage = if used {
+            raw as f64
+        } else if remaining {
+            100.0 - raw as f64
+        } else {
+            continue;
+        };
+        worst = Some(worst.map_or(percentage, |worst| worst.max(percentage)));
+    }
+    worst
+}
+
+fn assess_sata_ssd(disk: &Disk, worsening: bool) -> Assessment {
+    let damage = sector_damage(disk);
+    let wear = wear_used(disk);
+    let mut reasons = damage.reasons;
+    let score = match wear {
+        Some(used) => {
+            reasons.insert(0, format!("{used:.0}% of rated endurance used"));
+            100.0 - used - damage.points
+        }
+        None if damage.points == 0.0 => {
+            return Assessment {
+                score: None,
+                tier: Tier::Unknown,
+                reasons: vec!["SATA SSD wear attributes are not mapped for this drive".to_string()],
+            }
+        }
+        None => {
+            reasons.insert(0, "SATA SSD wear attributes are not mapped for this drive".to_string());
+            100.0 - damage.points
+        }
     };
-    Assessment { score: None, tier: Tier::Unknown, reasons: vec![reason.to_string()] }
+    let score = score.max(0.0);
+    let mut tier = if score < WARNING_BELOW {
+        Tier::Warning
+    } else if damage.points > 0.0 {
+        Tier::Watch
+    } else {
+        Tier::Healthy
+    };
+    if worsening {
+        tier = Tier::Critical;
+        reasons.insert(0, "Damage counters rose in the last 7 days".to_string());
+    }
+    Assessment { score: Some(score), tier, reasons }
+}
+
+fn unscored() -> Assessment {
+    Assessment {
+        score: None,
+        tier: Tier::Unknown,
+        reasons: vec!["Drive type is not supported yet".to_string()],
+    }
 }
 
 #[cfg(test)]
@@ -156,8 +239,18 @@ mod tests {
             temperature_c: None,
             smart_passed: Some(true),
             attributes: values.iter().copied().collect::<BTreeMap<_, _>>(),
+            attribute_names: BTreeMap::new(),
             nvme: None,
         }
+    }
+
+    fn sata_ssd(attributes: &[(u32, &str, i64)]) -> Disk {
+        let mut disk = hdd(&[]);
+        disk.kind = Kind::SataSsd;
+        disk.attributes = attributes.iter().map(|(id, _, raw)| (*id, *raw)).collect();
+        disk.attribute_names =
+            attributes.iter().map(|(id, name, _)| (*id, name.to_string())).collect();
+        disk
     }
 
     fn nvme(used: u64, spare: u64, threshold: u64) -> Disk {
@@ -258,5 +351,79 @@ mod tests {
     fn hdd_fixture_scores_from_real_shaped_json() {
         let disk = parse(include_str!("../tests/fixtures/hdd_synthetic.json")).unwrap();
         assert_eq!(assess(&disk, false).score, Some(79.0)); // 10 + 1 + 10
+    }
+
+    #[test]
+    fn sata_ssd_life_left_drives_the_score() {
+        let result = assess(&sata_ssd(&[(231, "SSD_Life_Left", 90)]), false);
+        assert_eq!((result.score, result.tier), (Some(90.0), Tier::Healthy));
+        assert_eq!(result.reasons[0], "10% of rated endurance used");
+    }
+
+    #[test]
+    fn sata_ssd_vendor_wear_names_are_understood() {
+        for (id, name, raw, used) in [
+            (233, "Media_Wearout_Indicator", 80, 20.0),
+            (169, "Remaining_Lifetime_Perc", 95, 5.0),
+            (202, "Perc_Rated_Life_Used", 25, 25.0),
+        ] {
+            let result = assess(&sata_ssd(&[(id, name, raw)]), false);
+            assert_eq!(result.score, Some(100.0 - used), "{name}");
+            assert_eq!(result.tier, Tier::Healthy, "{name}");
+        }
+    }
+
+    #[test]
+    fn sata_ssd_unknown_wear_without_damage_is_unknown() {
+        let result = assess(&sata_ssd(&[]), false);
+        assert_eq!((result.score, result.tier), (None, Tier::Unknown));
+    }
+
+    #[test]
+    fn sata_ssd_unknown_wear_still_scores_damage() {
+        let result = assess(&sata_ssd(&[(197, "Current_Pending_Sector", 1)]), false);
+        assert_eq!((result.score, result.tier), (Some(95.0), Tier::Watch));
+        assert!(result.reasons.iter().any(|reason| reason.contains("not mapped")));
+    }
+
+    #[test]
+    fn sata_ssd_wear_and_damage_stack() {
+        let result =
+            assess(&sata_ssd(&[(231, "SSD_Life_Left", 50), (197, "Current_Pending_Sector", 1)]), false);
+        assert_eq!((result.score, result.tier), (Some(45.0), Tier::Watch));
+    }
+
+    #[test]
+    fn sata_ssd_high_wear_is_warning() {
+        let result = assess(&sata_ssd(&[(231, "SSD_Life_Left", 10)]), false);
+        assert_eq!((result.score, result.tier), (Some(10.0), Tier::Warning));
+    }
+
+    #[test]
+    fn sata_ssd_worsening_is_critical() {
+        let result = assess(&sata_ssd(&[(231, "SSD_Life_Left", 90)]), true);
+        assert_eq!((result.score, result.tier), (Some(90.0), Tier::Critical));
+    }
+
+    #[test]
+    fn sata_ssd_out_of_range_wear_is_ignored() {
+        let result = assess(&sata_ssd(&[(231, "SSD_Life_Left", 200)]), false);
+        assert_eq!(result.tier, Tier::Unknown);
+    }
+
+    #[test]
+    fn sata_ssd_wear_comes_through_the_smart_json() {
+        let json = r#"{
+            "device": {"protocol": "ATA"},
+            "serial_number": "X",
+            "rotation_rate": 0,
+            "smart_status": {"passed": true},
+            "ata_smart_attributes": {"table": [
+                {"id": 231, "name": "SSD_Life_Left", "raw": {"value": 92}}
+            ]}
+        }"#;
+        let disk = parse(json).unwrap();
+        let result = assess(&disk, false);
+        assert_eq!((result.score, result.tier), (Some(92.0), Tier::Healthy));
     }
 }
