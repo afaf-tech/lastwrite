@@ -147,33 +147,35 @@ fn assess_nvme(disk: &Disk, worsening: bool) -> Assessment {
     Assessment { score: Some(score), tier, reasons }
 }
 
-/// Vendor SATA SSDs expose remaining endurance under different attribute
-/// names. Every known one is a percentage: the older "remaining" names count
-/// down, while the newer "used" names count up.
+/// Vendor SATA SSDs expose endurance under different attribute names, but all
+/// of them follow the SMART convention that the normalized value is the health
+/// left: 100 when new, falling towards the threshold. The raw value is not
+/// used because it differs by vendor (a counter, a percentage used, or 0).
 fn wear_used(disk: &Disk) -> Option<f64> {
     let mut worst: Option<f64> = None;
     for (id, name) in &disk.attribute_names {
-        let Some(&raw) = disk.attributes.get(id) else { continue };
-        if !(0..=100).contains(&raw) {
+        let Some(&value) = disk.attribute_values.get(id) else { continue };
+        if !(1..=100).contains(&value) {
             continue;
         }
         let name = name.to_ascii_lowercase();
-        let remaining = name.contains("life_left")
-            || name.contains("wearout_indicator")
-            || name.contains("lifetime_remain")
-            || name.contains("remaining_lifetime")
-            || name.contains("remaining_life");
-        let used = name.contains("rated_life_used")
-            || name.contains("lifetime_used")
-            || name.contains("life_used");
-        let percentage = if used {
-            raw as f64
-        } else if remaining {
-            100.0 - raw as f64
-        } else {
+        let is_wear = [
+            "life_left",
+            "wearout_indicator",
+            "lifetime_remain",
+            "remaining_lifetime",
+            "remaining_life",
+            "rated_life_used",
+            "lifetime_used",
+            "life_used",
+        ]
+        .iter()
+        .any(|pattern| name.contains(pattern));
+        if !is_wear {
             continue;
-        };
-        worst = Some(worst.map_or(percentage, |worst| worst.max(percentage)));
+        }
+        let used = 100.0 - value as f64;
+        worst = Some(worst.map_or(used, |worst| worst.max(used)));
     }
     worst
 }
@@ -240,16 +242,22 @@ mod tests {
             smart_passed: Some(true),
             attributes: values.iter().copied().collect::<BTreeMap<_, _>>(),
             attribute_names: BTreeMap::new(),
+            attribute_values: BTreeMap::new(),
             nvme: None,
         }
     }
 
-    fn sata_ssd(attributes: &[(u32, &str, i64)]) -> Disk {
-        let mut disk = hdd(&[]);
+    /// `wear` is (id, name, normalized value) with a raw value of 0, which is
+    /// what real drives report for many of these attributes. `damage` is
+    /// (id, raw count).
+    fn sata_ssd(wear: &[(u32, &str, i64)], damage: &[(u32, i64)]) -> Disk {
+        let mut disk = hdd(damage);
         disk.kind = Kind::SataSsd;
-        disk.attributes = attributes.iter().map(|(id, _, raw)| (*id, *raw)).collect();
-        disk.attribute_names =
-            attributes.iter().map(|(id, name, _)| (*id, name.to_string())).collect();
+        for (id, name, value) in wear {
+            disk.attributes.insert(*id, 0);
+            disk.attribute_names.insert(*id, name.to_string());
+            disk.attribute_values.insert(*id, *value);
+        }
         disk
     }
 
@@ -355,60 +363,75 @@ mod tests {
 
     #[test]
     fn sata_ssd_life_left_drives_the_score() {
-        let result = assess(&sata_ssd(&[(231, "SSD_Life_Left", 90)]), false);
+        let result = assess(&sata_ssd(&[(231, "SSD_Life_Left", 90)], &[]), false);
         assert_eq!((result.score, result.tier), (Some(90.0), Tier::Healthy));
         assert_eq!(result.reasons[0], "10% of rated endurance used");
     }
 
     #[test]
     fn sata_ssd_vendor_wear_names_are_understood() {
-        for (id, name, raw, used) in [
+        for (id, name, value, used) in [
             (233, "Media_Wearout_Indicator", 80, 20.0),
             (169, "Remaining_Lifetime_Perc", 95, 5.0),
-            (202, "Perc_Rated_Life_Used", 25, 25.0),
+            (202, "Perc_Rated_Life_Used", 75, 25.0),
+            (202, "Percent_Lifetime_Remain", 60, 40.0),
         ] {
-            let result = assess(&sata_ssd(&[(id, name, raw)]), false);
+            let result = assess(&sata_ssd(&[(id, name, value)], &[]), false);
             assert_eq!(result.score, Some(100.0 - used), "{name}");
-            assert_eq!(result.tier, Tier::Healthy, "{name}");
         }
     }
 
     #[test]
+    fn sata_ssd_new_drive_with_zero_raw_is_healthy() {
+        // Crucial-style: normalized 100, raw 0. Reading raw as "life left"
+        // would score a new drive as fully worn.
+        let result = assess(&sata_ssd(&[(202, "Percent_Lifetime_Remain", 100)], &[]), false);
+        assert_eq!((result.score, result.tier), (Some(100.0), Tier::Healthy));
+    }
+
+    #[test]
+    fn sata_ssd_most_worn_attribute_wins() {
+        let wear = [(231, "SSD_Life_Left", 95), (233, "Media_Wearout_Indicator", 70)];
+        assert_eq!(assess(&sata_ssd(&wear, &[]), false).score, Some(70.0));
+    }
+
+    #[test]
     fn sata_ssd_unknown_wear_without_damage_is_unknown() {
-        let result = assess(&sata_ssd(&[]), false);
+        let result = assess(&sata_ssd(&[], &[]), false);
         assert_eq!((result.score, result.tier), (None, Tier::Unknown));
     }
 
     #[test]
     fn sata_ssd_unknown_wear_still_scores_damage() {
-        let result = assess(&sata_ssd(&[(197, "Current_Pending_Sector", 1)]), false);
+        let result = assess(&sata_ssd(&[], &[(197, 1)]), false);
         assert_eq!((result.score, result.tier), (Some(95.0), Tier::Watch));
         assert!(result.reasons.iter().any(|reason| reason.contains("not mapped")));
     }
 
     #[test]
     fn sata_ssd_wear_and_damage_stack() {
-        let result =
-            assess(&sata_ssd(&[(231, "SSD_Life_Left", 50), (197, "Current_Pending_Sector", 1)]), false);
+        let result = assess(&sata_ssd(&[(231, "SSD_Life_Left", 50)], &[(197, 1)]), false);
         assert_eq!((result.score, result.tier), (Some(45.0), Tier::Watch));
     }
 
     #[test]
     fn sata_ssd_high_wear_is_warning() {
-        let result = assess(&sata_ssd(&[(231, "SSD_Life_Left", 10)]), false);
+        let result = assess(&sata_ssd(&[(231, "SSD_Life_Left", 10)], &[]), false);
         assert_eq!((result.score, result.tier), (Some(10.0), Tier::Warning));
     }
 
     #[test]
     fn sata_ssd_worsening_is_critical() {
-        let result = assess(&sata_ssd(&[(231, "SSD_Life_Left", 90)]), true);
+        let result = assess(&sata_ssd(&[(231, "SSD_Life_Left", 90)], &[]), true);
         assert_eq!((result.score, result.tier), (Some(90.0), Tier::Critical));
     }
 
     #[test]
     fn sata_ssd_out_of_range_wear_is_ignored() {
-        let result = assess(&sata_ssd(&[(231, "SSD_Life_Left", 200)]), false);
-        assert_eq!(result.tier, Tier::Unknown);
+        for value in [0, 101, 200, 253] {
+            let result = assess(&sata_ssd(&[(231, "SSD_Life_Left", value)], &[]), false);
+            assert_eq!(result.tier, Tier::Unknown, "value {value}");
+        }
     }
 
     #[test]
@@ -419,11 +442,23 @@ mod tests {
             "rotation_rate": 0,
             "smart_status": {"passed": true},
             "ata_smart_attributes": {"table": [
+                {"id": 202, "name": "Percent_Lifetime_Remain", "value": 92, "raw": {"value": 0}}
+            ]}
+        }"#;
+        let result = assess(&parse(json).unwrap(), false);
+        assert_eq!((result.score, result.tier), (Some(92.0), Tier::Healthy));
+    }
+
+    #[test]
+    fn sata_ssd_attribute_without_a_normalized_value_is_unmapped() {
+        let json = r#"{
+            "device": {"protocol": "ATA"},
+            "serial_number": "X",
+            "rotation_rate": 0,
+            "ata_smart_attributes": {"table": [
                 {"id": 231, "name": "SSD_Life_Left", "raw": {"value": 92}}
             ]}
         }"#;
-        let disk = parse(json).unwrap();
-        let result = assess(&disk, false);
-        assert_eq!((result.score, result.tier), (Some(92.0), Tier::Healthy));
+        assert_eq!(assess(&parse(json).unwrap(), false).tier, Tier::Unknown);
     }
 }

@@ -40,8 +40,11 @@ Everything below only reads the drive, except step 5, which spins it down.
     Expected: the dashboard opens with every drive listed (model, type,
     score, tier, temperature, trend), most at risk first. Press r to refresh
     and q to quit; the terminal must be restored.
-    SATA SSDs are scored from their vendor wear attribute (231, 233, 202 or
-    169). A drive with none of those shows "Unknown".
+    SATA SSDs are scored from the normalized value of their vendor wear
+    attribute (231, 233, 202 or 169). A new, healthy SATA SSD must score
+    near 100%; a score near 0% on a healthy drive is a bug, so send the
+    drive.json from step 4. A drive with none of those attributes shows
+    "Unknown".
     For plain text instead, run: lastwrite report --db /tmp/lastwrite-test.sqlite
 
 [ ] 7. Test alerts (optional, needs a webhook or Telegram bot)

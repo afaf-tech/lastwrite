@@ -50,6 +50,8 @@ pub struct Disk {
     pub smart_passed: Option<bool>,
     pub attributes: BTreeMap<u32, i64>,
     pub attribute_names: BTreeMap<u32, String>,
+    /// Normalized values (higher is better), kept apart from raw counters.
+    pub attribute_values: BTreeMap<u32, i64>,
     pub nvme: Option<NvmeHealth>,
 }
 
@@ -122,6 +124,8 @@ struct AtaAttribute {
     id: u32,
     #[serde(default)]
     name: String,
+    #[serde(default)]
+    value: Option<i64>,
     raw: AtaRaw,
 }
 
@@ -182,20 +186,18 @@ pub fn parse(json: &str) -> Result<Disk, String> {
         ("ATA", Some(_)) => Kind::Hdd,
         _ => Kind::Unknown,
     };
-    let (mut attributes, attribute_names): (BTreeMap<u32, i64>, BTreeMap<u32, String>) = report
-        .ata_smart_attributes
-        .map(|ata| {
-            let mut attributes = BTreeMap::new();
-            let mut names = BTreeMap::new();
-            for attribute in ata.table {
-                attributes.insert(attribute.id, attribute.raw.value);
-                if !attribute.name.is_empty() {
-                    names.insert(attribute.id, attribute.name);
-                }
-            }
-            (attributes, names)
-        })
-        .unwrap_or_default();
+    let mut attributes = BTreeMap::new();
+    let mut attribute_names = BTreeMap::new();
+    let mut attribute_values = BTreeMap::new();
+    for attribute in report.ata_smart_attributes.map(|ata| ata.table).unwrap_or_default() {
+        attributes.insert(attribute.id, attribute.raw.value);
+        if !attribute.name.is_empty() {
+            attribute_names.insert(attribute.id, attribute.name);
+        }
+        if let Some(value) = attribute.value {
+            attribute_values.insert(attribute.id, value);
+        }
+    }
     if let Some(health) = &report.nvme_smart_health_information_log {
         attributes.insert(NVME_MEDIA_ERRORS_ID, health.media_errors);
     }
@@ -210,6 +212,7 @@ pub fn parse(json: &str) -> Result<Disk, String> {
         smart_passed: report.smart_status.map(|s| s.passed),
         attributes,
         attribute_names,
+        attribute_values,
         nvme: report.nvme_smart_health_information_log,
     })
 }
