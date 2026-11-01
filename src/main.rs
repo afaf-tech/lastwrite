@@ -2,7 +2,9 @@ mod alert;
 mod score;
 mod smart;
 mod store;
+mod tui;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::{self, ExitCode};
 use std::thread;
@@ -14,27 +16,30 @@ use serde_json::json;
 use smart::{Disk, Kind};
 use store::Store;
 
-const USAGE: &str = "usage: lastwrite [--db PATH] | lastwrite daemon [--db PATH] | lastwrite alert-test";
+const USAGE: &str = "usage: lastwrite [--db PATH] | lastwrite tui|report [--db PATH] | \
+                     lastwrite daemon [--db PATH] | lastwrite alert-test";
 
 /// One failed poll can be a glitch; two in a row get an alert.
 const MISSING_POLLS: u32 = 2;
 
 enum Mode {
+    Default,
+    Tui,
     Report,
     Daemon,
     AlertTest,
 }
 
-struct Reading {
-    disk_id: i64,
-    disk: Disk,
-    assessment: Assessment,
+pub(crate) struct Reading {
+    pub(crate) disk_id: i64,
+    pub(crate) disk: Disk,
+    pub(crate) assessment: Assessment,
 }
 
-struct Poll {
-    readings: Vec<Reading>,
-    asleep: Vec<String>,
-    all_read: bool,
+pub(crate) struct Poll {
+    pub(crate) readings: Vec<Reading>,
+    pub(crate) asleep: Vec<String>,
+    pub(crate) all_read: bool,
 }
 
 fn main() -> ExitCode {
@@ -51,7 +56,18 @@ fn main() -> ExitCode {
 /// Returns false if any drive could not be read.
 fn run() -> Result<bool, String> {
     let (mode, db) = parse_args(std::env::args().skip(1).collect())?;
+    // A plain run opens the dashboard on a terminal and stays script-friendly
+    // when its output is piped.
+    let mode = match mode {
+        Mode::Default if std::io::stdout().is_terminal() => Mode::Tui,
+        Mode::Default => Mode::Report,
+        mode => mode,
+    };
     match mode {
+        Mode::Tui => {
+            tui::run(database_path(db)?)?;
+            Ok(true)
+        }
         Mode::Report => {
             let mut store = Store::open(&database_path(db)?)?;
             let poll = poll(&mut store)?;
@@ -69,6 +85,7 @@ fn run() -> Result<bool, String> {
             daemon(store, settings)
         }
         Mode::AlertTest => alert_test(),
+        Mode::Default => unreachable!("default mode is resolved above"),
     }
 }
 
@@ -77,9 +94,11 @@ fn parse_args(args: Vec<String>) -> Result<(Mode, Option<PathBuf>), String> {
     let mode = match args.peek().map(String::as_str) {
         Some("daemon") => Mode::Daemon,
         Some("alert-test") => Mode::AlertTest,
-        _ => Mode::Report,
+        Some("tui") => Mode::Tui,
+        Some("report") => Mode::Report,
+        _ => Mode::Default,
     };
-    if !matches!(mode, Mode::Report) {
+    if !matches!(mode, Mode::Default) {
         args.next();
     }
     match (args.next().as_deref(), args.next(), args.next()) {
@@ -105,7 +124,7 @@ fn now() -> Result<i64, String> {
         .map_err(|e| e.to_string())
 }
 
-fn poll(store: &mut Store) -> Result<Poll, String> {
+pub(crate) fn poll(store: &mut Store) -> Result<Poll, String> {
     let now = now()?;
     let devices = smart::scan()?;
     let mut readings = Vec::new();
@@ -298,7 +317,7 @@ fn render(disk: &Disk, assessment: &Assessment) -> String {
 }
 
 /// Failure odds come from `backtest/` and only apply to HDDs.
-fn advice(kind: Kind, tier: Tier) -> Option<&'static str> {
+pub(crate) fn advice(kind: Kind, tier: Tier) -> Option<&'static str> {
     match (kind, tier) {
         (Kind::Hdd, Tier::Critical) => Some(
             "Between 1 in 9 and 1 in 6 drives like this fail within 60 days. \

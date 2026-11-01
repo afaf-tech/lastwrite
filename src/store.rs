@@ -63,6 +63,13 @@ pub struct KnownDisk {
     pub device: String,
 }
 
+pub struct Snapshot {
+    pub timestamp: i64,
+    pub score: Option<f64>,
+    pub temperature_c: Option<i64>,
+    pub worsening: bool,
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Store, String> {
         if let Some(parent) = path.parent() {
@@ -163,6 +170,29 @@ impl Store {
             )
             .optional()?;
         Ok(state.unwrap_or_default())
+    }
+
+    /// Newest `limit` snapshots, returned oldest first for a left-to-right trend.
+    pub fn history(&self, disk_id: i64, limit: i64) -> Result<Vec<Snapshot>> {
+        let mut query = self.conn.prepare_cached(
+            "SELECT timestamp, health_score, temperature_c, is_worsening
+             FROM health_snapshots
+             WHERE disk_id = ?1
+             ORDER BY timestamp DESC
+             LIMIT ?2",
+        )?;
+        let mut snapshots = query
+            .query_map(params![disk_id, limit], |row| {
+                Ok(Snapshot {
+                    timestamp: row.get(0)?,
+                    score: row.get(1)?,
+                    temperature_c: row.get(2)?,
+                    worsening: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        snapshots.reverse();
+        Ok(snapshots)
     }
 
     pub fn known_disks(&self) -> Result<Vec<KnownDisk>> {
@@ -323,5 +353,26 @@ mod tests {
     fn same_serial_reuses_disk_row() {
         let store = store();
         assert_eq!(store.upsert_disk(&disk()).unwrap(), store.upsert_disk(&disk()).unwrap());
+    }
+
+    #[test]
+    fn history_returns_the_newest_limit_oldest_first() {
+        let mut store = store();
+        let id = record(&mut store, &disk(), NOW - 2 * DAY);
+        record(&mut store, &disk(), NOW - DAY);
+        record(&mut store, &disk(), NOW);
+        let history = store.history(id, 2).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].timestamp, NOW - DAY);
+        assert_eq!(history[1].timestamp, NOW);
+        assert_eq!(history[0].score, Some(79.0));
+        assert_eq!(history[0].temperature_c, Some(38));
+        assert!(!history[0].worsening);
+    }
+
+    #[test]
+    fn history_of_unknown_disk_is_empty() {
+        let store = store();
+        assert!(store.history(999, 10).unwrap().is_empty());
     }
 }
