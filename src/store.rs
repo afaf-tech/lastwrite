@@ -9,6 +9,10 @@ use crate::alert::AlertState;
 use crate::score::{Assessment, CRITICAL_IDS};
 use crate::smart::Disk;
 
+/// Stored in the database's `user_version`. Raise it together with a migration
+/// step in `Store::open` whenever an existing table changes.
+const SCHEMA_VERSION: i64 = 1;
+
 const WORSENING_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
 
 const SCHEMA: &str = "
@@ -76,7 +80,18 @@ impl Store {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        if version > SCHEMA_VERSION {
+            return Err(format!(
+                "{} was written by a newer lastwrite (schema {version}, this build \
+                 understands {SCHEMA_VERSION}); upgrade lastwrite",
+                path.display()
+            ));
+        }
         conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION).map_err(|e| e.to_string())?;
         Ok(Store { conn })
     }
 
@@ -274,6 +289,36 @@ mod tests {
         let id = store.upsert_disk(disk).unwrap();
         store.save_snapshot(id, disk, &assess(disk, false), false, at).unwrap();
         id
+    }
+
+    fn temp_db(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("lastwrite-{}-{name}.sqlite", std::process::id()));
+        let _ = fs::remove_file(&path);
+        path
+    }
+
+    #[test]
+    fn open_stamps_the_schema_version_and_keeps_data() {
+        let path = temp_db("reopen");
+        let first = Store::open(&path).unwrap();
+        let id = first.upsert_disk(&disk()).unwrap();
+        drop(first);
+        let second = Store::open(&path).unwrap();
+        assert_eq!(second.known_disks().unwrap()[0].id, id);
+        let version: i64 =
+            second.conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        drop(second);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn open_refuses_a_database_from_a_newer_version() {
+        let path = temp_db("newer");
+        Connection::open(&path).unwrap().pragma_update(None, "user_version", 99).unwrap();
+        let error = Store::open(&path).err().expect("must refuse");
+        assert!(error.contains("newer lastwrite"), "{error}");
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
