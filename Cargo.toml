@@ -3,11 +3,33 @@ name = "lastwrite"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "lastwrite"
+path = "src/main.rs"
+
+[[bin]]
+name = "lastwrite-desktop"
+path = "src/bin/lastwrite-desktop.rs"
+required-features = ["gui"]
+
+[features]
+gui = ["dep:eframe"]
+
 [dependencies]
 crossterm = "0.29.0"
 dirs = "7.0.0"
+eframe = { version = "0.37.0", optional = true }
 ratatui = { version = "0.30.2", features = ["crossterm_0_29"] }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 ureq = { version = "3.5.0", features = ["json"] }
+
+[package.metadata.bundle]
+name = "Lastwrite"
+identifier = "dev.lastwrite.Lastwrite"
+icon = ["icons/icon.icns", "icons/icon.ico", "icons/icon.png"]
+category = "Utility"
+short_description = "Disk health monitor"
+long_description = "Know which disk to replace next, before it takes your data."
+osx_minimum_system_version = "11.0"

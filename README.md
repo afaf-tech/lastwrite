@@ -2,7 +2,7 @@
 
 Lastwrite watches the health of your hard drives and SSDs and tells you which one to replace next. It reads S.M.A.R.T. data through `smartctl`, turns it into a health score and a risk tier, keeps the history in a local SQLite file, and can alert you through a webhook or Telegram.
 
-It is one binary with an interactive terminal dashboard and a background daemon. There is no web server, no Docker and no database to install.
+It is a small Rust toolchain: a CLI binary with an interactive terminal dashboard and a background daemon, plus an optional desktop app. There is no web server, no Docker and no database to install.
 
 > **Status: early.** The scoring for HDDs and SATA SSDs has been tested on recorded and simulated data but not yet on real drives. NVMe has been tested on one real drive. See [Known limits](#known-limits) before relying on it.
 
@@ -16,13 +16,31 @@ It is one binary with an interactive terminal dashboard and a background daemon.
 
 ```sh
 cargo build --release
-# the binary is target/release/lastwrite
+# target/release/lastwrite: terminal dashboard, report and daemon
+
+cargo build --release --features gui
+# also builds target/release/lastwrite-desktop, the desktop app
+```
+
+The desktop window is an optional feature so a headless server build does not
+pull in any GUI libraries.
+
+The `Makefile` wraps the common work; `make` on its own lists the targets:
+
+```sh
+make test          # tests with and without the desktop feature
+make lint          # clippy, zero warnings
+make app           # Lastwrite.app (macOS, ad-hoc signed)
+make dmg           # Lastwrite-<version>.dmg plus SHA256SUMS
+make install-app   # build, replace /Applications/Lastwrite.app and launch it
 ```
 
 ## Use
 
 ```sh
 lastwrite                  # dashboard in a terminal, plain text when piped
+lastwrite gui              # desktop window from the CLI binary
+lastwrite-desktop          # the same window, for launchers and app bundles
 lastwrite report           # always plain text
 lastwrite daemon           # poll in the background and send alerts
 lastwrite alert-test       # send a test message to your alert channels
@@ -31,6 +49,57 @@ lastwrite alert-test       # send a test message to your alert channels
 Add `--db PATH` to any of these to use a different history file. By default it is `lastwrite/lastwrite.sqlite` in your user config directory.
 
 In the dashboard, press `r` to refresh, the arrow keys to select a drive and `q` to quit.
+
+## Desktop app
+
+`lastwrite gui` opens a native window with the same drive list as the terminal
+dashboard: select a drive on the left to see its score, tier, temperature, score
+history and the reasons behind the score. Press **Refresh** to poll again. It
+reads and writes the same SQLite file as the other modes, so the history is
+shared, and it does not need a terminal.
+
+The window is built with egui and only compiles when the `gui` feature is
+enabled, which keeps builds for servers free of GUI dependencies.
+
+`lastwrite-desktop` is a separate binary that always opens the window, so a
+launcher or a double-click never needs an argument; it accepts the same
+`--db PATH` option. To package it:
+
+- **macOS:** `make app` builds `target/macos/Lastwrite.app`, and `make dmg`
+  produces `target/dist/Lastwrite-<version>.dmg` with a `SHA256SUMS` file.
+  `contrib/macos-app.sh` is the underlying script and needs only Xcode
+  command-line tools.
+- **Any platform:** with [cargo-bundle](https://github.com/burtonageo/cargo-bundle)
+  installed, `cargo bundle --release --features gui --bin lastwrite-desktop`
+  produces a native package from the `[package.metadata.bundle]` settings.
+
+## Releases
+
+Push a version tag to build the installers, or run the `release` workflow by
+hand from Actions:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Each platform job uploads its artifact to the workflow run, together with
+`SHA256SUMS`:
+
+| Platform | Artifact |
+|---|---|
+| macOS | `Lastwrite-<version>.dmg` |
+| Linux | `lastwrite-linux-x86_64.tar.gz` |
+| Windows | `lastwrite-windows-x86_64.zip` |
+
+Nothing is signed with a paid certificate yet. The macOS app is ad-hoc signed,
+so the first launch needs right-click > Open, or:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Lastwrite.app
+```
+
+Download `SHA256SUMS` with the archive and check it before running anything.
 
 ## Alerts
 
