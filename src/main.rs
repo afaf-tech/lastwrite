@@ -1,22 +1,18 @@
-mod alert;
-mod score;
-mod smart;
-mod store;
-mod tui;
-
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::{self, ExitCode};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use alert::Settings;
-use score::{Assessment, Tier};
 use serde_json::json;
-use smart::{Disk, Kind};
-use store::Store;
 
-const USAGE: &str = "usage: lastwrite [--db PATH] | lastwrite tui|report [--db PATH] | \
+use lastwrite::alert::{self, Settings};
+use lastwrite::score::Assessment;
+use lastwrite::smart::Disk;
+use lastwrite::store::Store;
+use lastwrite::{database_path, poll, render, Poll, Reading};
+
+const USAGE: &str = "usage: lastwrite [--db PATH] | lastwrite tui|report|gui [--db PATH] | \
                      lastwrite daemon [--db PATH] | lastwrite alert-test";
 
 /// One failed poll can be a glitch; two in a row get an alert.
@@ -30,20 +26,9 @@ enum Mode {
     Default,
     Tui,
     Report,
+    Gui,
     Daemon,
     AlertTest,
-}
-
-pub(crate) struct Reading {
-    pub(crate) disk_id: i64,
-    pub(crate) disk: Disk,
-    pub(crate) assessment: Assessment,
-}
-
-pub(crate) struct Poll {
-    pub(crate) readings: Vec<Reading>,
-    pub(crate) asleep: Vec<String>,
-    pub(crate) all_read: bool,
 }
 
 fn main() -> ExitCode {
@@ -69,7 +54,7 @@ fn run() -> Result<bool, String> {
     };
     match mode {
         Mode::Tui => {
-            tui::run(database_path(db)?)?;
+            lastwrite::tui::run(database_path(db)?)?;
             Ok(true)
         }
         Mode::Report => {
@@ -82,6 +67,17 @@ fn run() -> Result<bool, String> {
                 print!("{}", render(&reading.disk, &reading.assessment));
             }
             Ok(poll.all_read)
+        }
+        Mode::Gui => {
+            #[cfg(feature = "gui")]
+            {
+                lastwrite::gui::run(database_path(db)?).map(|()| true)
+            }
+            #[cfg(not(feature = "gui"))]
+            {
+                let _ = db;
+                Err("this build has no desktop app; rebuild with --features gui".to_string())
+            }
         }
         Mode::Daemon => {
             let settings = Settings::from_env()?;
@@ -99,6 +95,7 @@ fn parse_args(args: Vec<String>) -> Result<(Mode, Option<PathBuf>), String> {
         Some("daemon") => Mode::Daemon,
         Some("alert-test") => Mode::AlertTest,
         Some("tui") => Mode::Tui,
+        Some("gui") => Mode::Gui,
         Some("report") => Mode::Report,
         _ => Mode::Default,
     };
@@ -110,50 +107,6 @@ fn parse_args(args: Vec<String>) -> Result<(Mode, Option<PathBuf>), String> {
         (Some("--db"), Some(path), None) => Ok((mode, Some(PathBuf::from(path)))),
         _ => Err(USAGE.to_string()),
     }
-}
-
-fn database_path(custom: Option<PathBuf>) -> Result<PathBuf, String> {
-    match custom {
-        Some(path) => Ok(path),
-        None => dirs::config_dir()
-            .map(|dir| dir.join("lastwrite").join("lastwrite.sqlite"))
-            .ok_or_else(|| "cannot find the config directory".to_string()),
-    }
-}
-
-fn now() -> Result<i64, String> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
-        .map_err(|e| e.to_string())
-}
-
-pub(crate) fn poll(store: &mut Store) -> Result<Poll, String> {
-    let now = now()?;
-    let devices = smart::scan()?;
-    let mut readings = Vec::new();
-    let mut asleep = Vec::new();
-    let mut all_read = true;
-    for device in &devices {
-        match smart::read(device) {
-            Ok(disk) => {
-                let disk_id = store.upsert_disk(&disk).map_err(|e| e.to_string())?;
-                let worsening =
-                    store.is_worsening(disk_id, &disk, now).map_err(|e| e.to_string())?;
-                let assessment = score::assess(&disk, worsening);
-                store
-                    .save_snapshot(disk_id, &disk, &assessment, worsening, now)
-                    .map_err(|e| e.to_string())?;
-                readings.push(Reading { disk_id, disk, assessment });
-            }
-            Err(message) if smart::is_asleep(&message) => asleep.push(device.name.clone()),
-            Err(message) => {
-                all_read = false;
-                eprintln!("{}: {message}", device.name);
-            }
-        }
-    }
-    Ok(Poll { readings, asleep, all_read })
 }
 
 fn daemon(mut store: Store, settings: Settings) -> Result<bool, String> {
@@ -315,46 +268,6 @@ fn alert_test() -> Result<bool, String> {
     }
     println!("{} channel(s) delivered", delivery.delivered);
     Ok(delivery.failures.is_empty())
-}
-
-fn render(disk: &Disk, assessment: &Assessment) -> String {
-    let score = match assessment.score {
-        Some(score) => format!("{:.0}%", score.floor()),
-        None => "n/a".to_string(),
-    };
-    let temperature = match disk.temperature_c {
-        Some(temperature) => format!(", {temperature}C"),
-        None => String::new(),
-    };
-    let mut text = format!(
-        "{} ({}): {score}, {}{temperature}\n",
-        disk.model,
-        disk.kind.label(),
-        assessment.tier.label()
-    );
-    for reason in &assessment.reasons {
-        text.push_str(&format!("  - {reason}\n"));
-    }
-    if let Some(advice) = advice(disk.kind, assessment.tier) {
-        text.push_str(&format!("  {advice}\n"));
-    }
-    text
-}
-
-/// Failure odds come from `backtest/` and only apply to HDDs.
-pub(crate) fn advice(kind: Kind, tier: Tier) -> Option<&'static str> {
-    match (kind, tier) {
-        (Kind::Hdd, Tier::Critical) => Some(
-            "Between 1 in 9 and 1 in 6 drives like this fail within 60 days. \
-             Back up and plan a replacement.",
-        ),
-        (Kind::Hdd, Tier::Warning) => {
-            Some("About 1 in 20 drives like this fails within 60 days. Check your backups.")
-        }
-        (Kind::Hdd, Tier::Watch) => Some("About 1 in 70 drives like this fails within 60 days."),
-        (_, Tier::Critical) => Some("Back up now and plan a replacement."),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

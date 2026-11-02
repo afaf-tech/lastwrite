@@ -1,0 +1,109 @@
+name: release
+
+# Unsigned artifacts. The macOS app is ad-hoc signed by
+# contrib/macos-app.sh (no Developer ID, not notarized), so Gatekeeper shows the
+# ordinary "unidentified developer" prompt; Windows and Linux are unsigned.
+# Publish SHA256SUMS next to every download so users can check it.
+#
+# Manual runs: Actions -> release -> Run workflow.
+# Tagged runs: git tag v0.1.0 && git push origin v0.1.0
+#
+# Artifacts are attached to the workflow run; nothing is published to a
+# GitHub Release automatically.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos-dmg:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the .app and the .dmg
+        run: make dmg
+      - name: Verify the app inside the .dmg is signed
+        # Check the artifact a user actually downloads: a quarantined bundle
+        # with no signature at all reads as "damaged" on Apple Silicon.
+        run: |
+          dmg=$(ls target/dist/*.dmg | head -1)
+          echo "checking $dmg"
+          mount=$(mktemp -d)
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount" >/dev/null
+          trap 'hdiutil detach "$mount" >/dev/null || true' EXIT
+          app=$(ls -d "$mount"/*.app | head -1)
+          echo "app: $app"
+          codesign -dv --verbose=2 "$app" || true
+          codesign --verify --deep --strict --verbose=2 "$app"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lastwrite-macos-dmg
+          path: |
+            target/dist/*.dmg
+            target/dist/SHA256SUMS
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install windowing headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libgl1-mesa-dev
+      - name: Build both binaries
+        run: cargo build --release --locked --features gui
+      - name: Package
+        run: |
+          mkdir -p target/dist
+          tar -czf target/dist/lastwrite-linux-x86_64.tar.gz \
+            -C target/release lastwrite lastwrite-desktop
+          cd target/dist
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lastwrite-linux
+          path: |
+            target/dist/*.tar.gz
+            target/dist/SHA256SUMS
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build both binaries
+        run: cargo build --release --locked --features gui
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force target/dist | Out-Null
+          Compress-Archive -Path target/release/lastwrite.exe, target/release/lastwrite-desktop.exe `
+            -DestinationPath target/dist/lastwrite-windows-x86_64.zip
+          $sums = Get-ChildItem target/dist/*.zip | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          }
+          $sums | Set-Content target/dist/SHA256SUMS
+          $sums
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lastwrite-windows
+          path: |
+            target/dist/*.zip
+            target/dist/SHA256SUMS
+          if-no-files-found: error

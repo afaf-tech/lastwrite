@@ -7,7 +7,7 @@ use std::panic;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -22,12 +22,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{Frame, Terminal};
 
+use crate::advice;
 use crate::score::Tier;
-use crate::store::{Snapshot, Store};
-use crate::{advice, poll, Poll, Reading};
+use crate::store::Store;
+use crate::view::{
+    self, ago_text, human_bytes, now_epoch, score_text, temperature_text, DiskView, TREND_POINTS,
+};
 
-const HISTORY_POINTS: i64 = 32;
-const TREND_POINTS: usize = 12;
 const REFRESH_TICK: Duration = Duration::from_millis(250);
 
 enum Command {
@@ -40,15 +41,9 @@ enum Update {
     Failed(String),
 }
 
-struct DiskView {
-    reading: Reading,
-    history: Vec<Snapshot>,
-}
-
 impl DiskView {
     fn trend(&self) -> String {
-        let scores: Vec<f64> = self.history.iter().filter_map(|snapshot| snapshot.score).collect();
-        sparkline(&scores)
+        sparkline(&self.scores())
     }
 }
 
@@ -87,8 +82,7 @@ impl App {
 
     fn apply(&mut self, update: Update) {
         match update {
-            Update::Done(mut disks) => {
-                sort_views(&mut disks);
+            Update::Done(disks) => {
                 self.disks = disks;
                 self.selected = self.selected.min(self.disks.len().saturating_sub(1));
                 self.refreshing = false;
@@ -179,18 +173,10 @@ fn worker(path: PathBuf, commands: Receiver<Command>, updates: Sender<Update>) {
 }
 
 fn refresh(store: &mut Store) -> Update {
-    let Poll { readings, .. } = match poll(store) {
-        Ok(poll) => poll,
-        Err(message) => return Update::Failed(message),
-    };
-    let mut views = Vec::with_capacity(readings.len());
-    for reading in readings {
-        match store.history(reading.disk_id, HISTORY_POINTS) {
-            Ok(history) => views.push(DiskView { reading, history }),
-            Err(error) => return Update::Failed(error.to_string()),
-        }
+    match view::refresh(store) {
+        Ok(disks) => Update::Done(disks),
+        Err(message) => Update::Failed(message),
     }
-    Update::Done(views)
 }
 
 fn install_panic_hook() {
@@ -391,20 +377,6 @@ fn state_text(app: &App) -> String {
     }
 }
 
-fn score_text(score: Option<f64>) -> String {
-    match score {
-        Some(score) => format!("{:.0}%", score.floor()),
-        None => "n/a".to_string(),
-    }
-}
-
-fn temperature_text(temperature: Option<i64>) -> String {
-    match temperature {
-        Some(temperature) => format!("{temperature}C"),
-        None => "-".to_string(),
-    }
-}
-
 fn tier_style(tier: Tier) -> Style {
     let color = match tier {
         Tier::Critical => Color::Red,
@@ -448,38 +420,6 @@ fn scaled_sparkline(values: &[f64]) -> String {
         .collect()
 }
 
-fn now_epoch() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-fn ago_text(seconds: i64) -> String {
-    if seconds < 60 {
-        format!("{seconds}s ago")
-    } else if seconds < 60 * 60 {
-        format!("{}m ago", seconds / 60)
-    } else {
-        format!("{}h ago", seconds / (60 * 60))
-    }
-}
-
-fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1000.0 && unit < UNITS.len() - 1 {
-        value /= 1000.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
-
 fn move_selection(selected: usize, len: usize, delta: isize) -> usize {
     if len == 0 {
         return 0;
@@ -488,33 +428,12 @@ fn move_selection(selected: usize, len: usize, delta: isize) -> usize {
     next.clamp(0, len as isize - 1) as usize
 }
 
-fn sort_views(disks: &mut [DiskView]) {
-    disks.sort_by(|a, b| {
-        severity(b.reading.assessment.tier)
-            .cmp(&severity(a.reading.assessment.tier))
-            .then_with(|| {
-                let left = a.reading.assessment.score.unwrap_or(f64::MAX);
-                let right = b.reading.assessment.score.unwrap_or(f64::MAX);
-                left.total_cmp(&right)
-            })
-    });
-}
-
-fn severity(tier: Tier) -> u8 {
-    match tier {
-        Tier::Critical => 4,
-        Tier::Warning => 3,
-        Tier::Watch => 2,
-        Tier::Unknown => 1,
-        Tier::Healthy => 0,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::score::Assessment;
     use crate::smart::{Disk, Kind};
+    use crate::Reading;
     use ratatui::backend::TestBackend;
     use std::collections::BTreeMap;
 
@@ -574,34 +493,13 @@ mod tests {
     }
 
     #[test]
-    fn human_bytes_uses_decimal_units() {
-        assert_eq!(human_bytes(512), "512 B");
-        assert_eq!(human_bytes(480103981056), "480.1 GB");
-        assert_eq!(human_bytes(1000204886016), "1.0 TB");
-    }
-
-    #[test]
-    fn views_sort_by_risk_then_score() {
-        let mut disks = vec![
-            sample("healthy", Tier::Healthy, Some(100.0)),
-            sample("critical", Tier::Critical, Some(9.0)),
-            sample("warning", Tier::Warning, Some(10.0)),
-            sample("watch", Tier::Watch, Some(50.0)),
-        ];
-        sort_views(&mut disks);
-        let order: Vec<&str> =
-            disks.iter().map(|view| view.reading.disk.model.as_str()).collect();
-        assert_eq!(order, ["critical", "warning", "watch", "healthy"]);
-    }
-
-    #[test]
-    fn apply_sorts_and_clamps_the_selection() {
+    fn apply_clamps_the_selection_to_the_new_list() {
         let mut app = App::new();
         app.selected = 5;
         app.refreshing = true;
         app.apply(Update::Done(vec![
-            sample("watch", Tier::Watch, Some(50.0)),
             sample("critical", Tier::Critical, Some(9.0)),
+            sample("watch", Tier::Watch, Some(50.0)),
         ]));
         assert_eq!(app.disks[0].reading.disk.model, "critical");
         assert_eq!(app.selected, 1);

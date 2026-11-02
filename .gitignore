@@ -9,3 +9,4 @@ backtest/.venv/
 secret.txt
 drive.json
 standby.json
+prompts/

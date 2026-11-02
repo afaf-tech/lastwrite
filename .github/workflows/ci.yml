@@ -23,3 +23,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
       - run: cargo clippy --all-targets --locked -- -D warnings
+
+  gui:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install windowing headers
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libgl1-mesa-dev
+      - run: cargo test --features gui --locked
+      - run: cargo clippy --all-targets --features gui --locked -- -D warnings
