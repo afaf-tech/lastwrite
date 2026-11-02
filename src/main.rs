@@ -8,7 +8,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::{self, ExitCode};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alert::Settings;
 use score::{Assessment, Tier};
@@ -21,6 +21,10 @@ const USAGE: &str = "usage: lastwrite [--db PATH] | lastwrite tui|report [--db P
 
 /// One failed poll can be a glitch; two in a row get an alert.
 const MISSING_POLLS: u32 = 2;
+
+/// After a failed send, the daemon polls again this soon instead of waiting
+/// out the full interval, so a dying drive's alert is not delayed for hours.
+const RETRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 enum Mode {
     Default,
@@ -159,32 +163,51 @@ fn daemon(mut store: Store, settings: Settings) -> Result<bool, String> {
     eprintln!("lastwrite: polling every {}s", settings.interval.as_secs());
     let host = hostname();
     loop {
+        let mut retry = false;
         // One bad poll must not stop monitoring.
         match poll(&mut store) {
             Ok(poll) => {
                 eprintln!("lastwrite: read {} drive(s)", poll.readings.len());
                 for reading in &poll.readings {
-                    if let Err(message) = notify(&store, &settings, &host, reading) {
-                        eprintln!("lastwrite: {message}");
+                    match notify(&store, &settings, &host, reading) {
+                        Ok(failed) => retry |= failed,
+                        Err(message) => eprintln!("lastwrite: {message}"),
                     }
                 }
-                if let Err(message) = check_missing(&store, &settings, &host, &poll) {
-                    eprintln!("lastwrite: {message}");
+                match check_missing(&store, &settings, &host, &poll) {
+                    Ok(failed) => retry |= failed,
+                    Err(message) => eprintln!("lastwrite: {message}"),
                 }
             }
             Err(message) => eprintln!("lastwrite: {message}"),
         }
-        thread::sleep(settings.interval);
+        thread::sleep(next_wait(settings.interval, retry));
     }
 }
 
+fn next_wait(interval: Duration, retry: bool) -> Duration {
+    if retry {
+        interval.min(RETRY_INTERVAL)
+    } else {
+        interval
+    }
+}
+
+/// True if an alert failed to send and should be retried soon. Having no
+/// channel configured is not a failure.
+fn send_failed(delivery: &alert::Delivery) -> bool {
+    delivery.delivered == 0 && !delivery.failures.is_empty()
+}
+
 /// A drive that stops answering may be the failure itself, so it alerts too.
+/// Returns true if an alert failed to send.
 fn check_missing(
     store: &Store,
     settings: &Settings,
     host: &str,
     poll: &Poll,
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    let mut retry = false;
     for known in store.known_disks().map_err(|e| e.to_string())? {
         if poll.readings.iter().any(|reading| reading.disk_id == known.id) {
             store.clear_missing(known.id).map_err(|e| e.to_string())?;
@@ -215,11 +238,13 @@ fn check_missing(
         if delivery.delivered > 0 {
             store.set_missing_alerted(known.id).map_err(|e| e.to_string())?;
         }
+        retry |= send_failed(&delivery);
     }
-    Ok(())
+    Ok(retry)
 }
 
-fn notify(store: &Store, settings: &Settings, host: &str, reading: &Reading) -> Result<(), String> {
+/// Returns true if an alert failed to send and should be retried soon.
+fn notify(store: &Store, settings: &Settings, host: &str, reading: &Reading) -> Result<bool, String> {
     let Reading { disk_id, disk, assessment } = reading;
     let state = store.alert_state(*disk_id).map_err(|e| e.to_string())?;
     let decision =
@@ -232,13 +257,13 @@ fn notify(store: &Store, settings: &Settings, host: &str, reading: &Reading) -> 
         }
         // Leaving the state unchanged retries this alert on the next poll.
         if delivery.delivered == 0 {
-            return Ok(());
+            return Ok(send_failed(&delivery));
         }
     }
     if decision.next != state {
         store.save_alert_state(*disk_id, decision.next).map_err(|e| e.to_string())?;
     }
-    Ok(())
+    Ok(false)
 }
 
 fn alert_text(
@@ -329,5 +354,35 @@ pub(crate) fn advice(kind: Kind, tier: Tier) -> Option<&'static str> {
         (Kind::Hdd, Tier::Watch) => Some("About 1 in 70 drives like this fails within 60 days."),
         (_, Tier::Critical) => Some("Back up now and plan a replacement."),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn delivery(delivered: usize, failures: &[&str]) -> alert::Delivery {
+        alert::Delivery { delivered, failures: failures.iter().map(|f| f.to_string()).collect() }
+    }
+
+    #[test]
+    fn failed_send_shortens_the_wait() {
+        let four_hours = Duration::from_secs(4 * 60 * 60);
+        assert_eq!(next_wait(four_hours, true), RETRY_INTERVAL);
+        assert_eq!(next_wait(four_hours, false), four_hours);
+    }
+
+    #[test]
+    fn retry_never_waits_longer_than_the_interval() {
+        let short = Duration::from_secs(60);
+        assert_eq!(next_wait(short, true), short);
+    }
+
+    #[test]
+    fn only_a_real_failure_triggers_a_retry() {
+        assert!(send_failed(&delivery(0, &["webhook: server returned HTTP 500"])));
+        assert!(!send_failed(&delivery(0, &[])), "no channel configured");
+        assert!(!send_failed(&delivery(1, &[])));
+        assert!(!send_failed(&delivery(1, &["telegram: request failed"])), "one channel got it");
     }
 }
