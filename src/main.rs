@@ -10,7 +10,7 @@ use lastwrite::alert::{self, Settings};
 use lastwrite::score::Assessment;
 use lastwrite::smart::Disk;
 use lastwrite::store::Store;
-use lastwrite::{database_path, poll, render, Poll, Reading};
+use lastwrite::{database_path, poll, render, render_hot, Poll, Reading};
 
 const USAGE: &str = "usage: lastwrite [--db PATH] | lastwrite tui|report|gui [--db PATH] | \
                      lastwrite daemon [--db PATH] | lastwrite alert-test";
@@ -226,10 +226,12 @@ fn alert_text(
     temp_alert: bool,
     temp_limit: i64,
 ) -> String {
-    let mut text = format!("lastwrite on {host}\n{}", render(disk, assessment));
-    if temp_alert {
-        text.push_str(&format!("  Temperature is above the {temp_limit}C limit.\n"));
-    }
+    let body = if temp_alert {
+        render_hot(disk, assessment, temp_limit)
+    } else {
+        render(disk, assessment)
+    };
+    let mut text = format!("lastwrite on {host}\n{body}");
     text.push_str(&format!("  Serial: {}\n", disk.serial));
     text
 }
