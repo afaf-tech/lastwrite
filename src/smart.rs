@@ -141,21 +141,77 @@ pub fn scan() -> Result<Vec<ScanDevice>, String> {
         .map_err(|e| format!("cannot run smartctl ({e}); install smartmontools"))?;
     let scan: Scan = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("cannot parse smartctl scan: {e}"))?;
-    Ok(scan.devices)
+    let mut devices = scan.devices;
+    add_missed_usb_disks(&mut devices);
+    Ok(devices)
 }
 
 pub fn read(device: &ScanDevice) -> Result<Disk, String> {
     // `-n standby` keeps polling from spinning up a sleeping HDD.
+    let mut disk = run_smartctl(device, &device.device_type)?;
+    // `--scan` reports a SATA disk behind an HBA as `scsi`, and reading it
+    // that way yields a serial but no SMART data. The SAT layer can still read
+    // it, so retry when the first read produced nothing usable.
+    if needs_sat_retry(&device.device_type, &disk) {
+        if let Ok(retried) = run_smartctl(device, "sat") {
+            if retried.kind != Kind::Unknown || !retried.attributes.is_empty() {
+                disk = retried;
+            }
+        }
+    }
+    disk.device = device.name.clone();
+    Ok(disk)
+}
+
+fn run_smartctl(device: &ScanDevice, device_type: &str) -> Result<Disk, String> {
     let output = Command::new("smartctl")
-        .args(["-a", "-j", "-n", "standby", "-d", &device.device_type, &device.name])
+        .args(["-a", "-j", "-n", "standby", "-d", device_type, &device.name])
         .output()
         .map_err(|e| format!("cannot run smartctl: {e}"))?;
     // The exit code is a bitmask that can be non-zero on good data, so the
     // JSON decides whether the read worked.
-    let mut disk = parse(&String::from_utf8_lossy(&output.stdout))?;
-    disk.device = device.name.clone();
-    Ok(disk)
+    parse(&String::from_utf8_lossy(&output.stdout))
 }
+
+fn needs_sat_retry(device_type: &str, disk: &Disk) -> bool {
+    device_type == "scsi" && disk.kind == Kind::Unknown && disk.attributes.is_empty()
+}
+
+/// True for whole-disk names like `sda` and `sdab`, false for partitions,
+/// NVMe names and device-mapper nodes.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn is_sd_name(name: &str) -> bool {
+    name.strip_prefix("sd")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_lowercase()))
+}
+
+/// `smartctl --scan` silently omits some USB bridges even though `-d sat`
+/// reads them. Every USB mass-storage disk shows up as an `sd` node in sysfs,
+/// so add the ones the scan missed and let `read` negotiate the protocol.
+#[cfg(target_os = "linux")]
+fn add_missed_usb_disks(devices: &mut Vec<ScanDevice>) {
+    let Ok(entries) = std::fs::read_dir("/sys/block") else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !is_sd_name(name) {
+            continue;
+        }
+        let is_usb = std::fs::canonicalize(entry.path().join("device"))
+            .is_ok_and(|path| path.to_string_lossy().contains("/usb"));
+        if !is_usb {
+            continue;
+        }
+        let device = format!("/dev/{name}");
+        if devices.iter().any(|known| known.name == device) {
+            continue;
+        }
+        devices.push(ScanDevice { name: device, device_type: "sat".to_string() });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn add_missed_usb_disks(_devices: &mut Vec<ScanDevice>) {}
 
 /// A sleeping drive is fine; `-n standby` makes smartctl skip it.
 /// The wording varies between smartctl versions and platforms, so match it
@@ -241,6 +297,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_sata_ssd_attributes() {
+        let disk = parse(include_str!("../tests/fixtures/sata_ssd_synthetic.json")).unwrap();
+        assert_eq!(disk.kind, Kind::SataSsd);
+        assert_eq!(disk.model, "CT1000MX500SSD1");
+        assert_eq!(disk.attribute_names[&5], "Reallocated_Sector_Ct");
+        assert_eq!(disk.attributes[&202], 0);
+        assert_eq!(disk.attribute_values[&202], 88);
+        assert_eq!(disk.capacity_bytes, Some(1000204886016));
+    }
+
+    #[test]
     fn standby_and_sleep_messages_are_asleep() {
         for message in [
             "Device is in STANDBY mode, exit(2)",
@@ -262,5 +329,29 @@ mod tests {
     fn missing_serial_reports_smartctl_message() {
         let json = r#"{"smartctl":{"messages":[{"string":"Device is in STANDBY mode"}]}}"#;
         assert_eq!(parse(json).unwrap_err(), "Device is in STANDBY mode");
+    }
+
+    #[test]
+    fn sat_retry_only_for_unusable_scsi_reads() {
+        let scsi = parse(
+            r#"{"device":{"protocol":"SCSI"},"serial_number":"X","rotation_rate":0}"#,
+        )
+        .unwrap();
+        assert!(needs_sat_retry("scsi", &scsi));
+        assert!(!needs_sat_retry("sat", &scsi));
+        assert!(!needs_sat_retry("nvme", &scsi));
+
+        let sata = parse(include_str!("../tests/fixtures/sata_ssd_synthetic.json")).unwrap();
+        assert!(!needs_sat_retry("scsi", &sata));
+    }
+
+    #[test]
+    fn sd_names_are_whole_disks_only() {
+        assert!(is_sd_name("sda"));
+        assert!(is_sd_name("sdab"));
+        assert!(!is_sd_name("sd"));
+        assert!(!is_sd_name("sda1"));
+        assert!(!is_sd_name("nvme0n1"));
+        assert!(!is_sd_name("dm-0"));
     }
 }

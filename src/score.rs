@@ -147,21 +147,34 @@ fn assess_nvme(disk: &Disk, worsening: bool) -> Assessment {
     Assessment { score: Some(score), tier, reasons }
 }
 
-/// Vendor SATA SSDs expose endurance under different attribute names, but all
-/// of them follow the SMART convention that the normalized value is the health
-/// left: 100 when new, falling towards the threshold. The raw value is not
+/// Vendor SATA SSDs expose endurance under different names and IDs. The names
+/// are matched first; 231, 233, 202 and 169 are the common IDs, used when
+/// smartctl does not know the vendor's attribute name and reports
+/// `Unknown_Attribute`.
+///
+/// A name like `Perc_Rated_Life_Used` says what the *raw* value counts, not the
+/// normalized one. Under the SMART convention the normalized `value` is always
+/// health left -- 100 when new, falling towards the threshold -- so `100 - value`
+/// is the percentage used for every attribute matched here. The raw value is not
 /// used because it differs by vendor (a counter, a percentage used, or 0).
 fn wear_used(disk: &Disk) -> Option<f64> {
     let mut worst: Option<f64> = None;
-    for (id, name) in &disk.attribute_names {
-        let Some(&value) = disk.attribute_values.get(id) else { continue };
+    for (id, &value) in &disk.attribute_values {
         if !(1..=100).contains(&value) {
             continue;
         }
-        let name = name.to_ascii_lowercase();
-        let is_wear = [
+        let name = disk
+            .attribute_names
+            .get(id)
+            .map(|name| name.to_ascii_lowercase())
+            .unwrap_or_default();
+        // Endurance attribute names seen across SSD vendors, lowercased. Some
+        // read as "used", but see above: the normalized value is still health
+        // left.
+        let named = [
             "life_left",
             "wearout_indicator",
+            "wear_leveling",
             "lifetime_remain",
             "remaining_lifetime",
             "remaining_life",
@@ -171,7 +184,9 @@ fn wear_used(disk: &Disk) -> Option<f64> {
         ]
         .iter()
         .any(|pattern| name.contains(pattern));
-        if !is_wear {
+        let unnamed_common_id =
+            (name.is_empty() || name.starts_with("unknown")) && [169, 202, 231, 233].contains(id);
+        if !named && !unnamed_common_id {
             continue;
         }
         let used = 100.0 - value as f64;
@@ -362,6 +377,14 @@ mod tests {
     }
 
     #[test]
+    fn sata_ssd_fixture_scores_from_real_shaped_json() {
+        let disk = parse(include_str!("../tests/fixtures/sata_ssd_synthetic.json")).unwrap();
+        let result = assess(&disk, false);
+        assert_eq!((result.score, result.tier), (Some(88.0), Tier::Healthy));
+        assert_eq!(result.reasons[0], "12% of rated endurance used");
+    }
+
+    #[test]
     fn sata_ssd_life_left_drives_the_score() {
         let result = assess(&sata_ssd(&[(231, "SSD_Life_Left", 90)], &[]), false);
         assert_eq!((result.score, result.tier), (Some(90.0), Tier::Healthy));
@@ -375,9 +398,27 @@ mod tests {
             (169, "Remaining_Lifetime_Perc", 95, 5.0),
             (202, "Perc_Rated_Life_Used", 75, 25.0),
             (202, "Percent_Lifetime_Remain", 60, 40.0),
+            (177, "Wear_Leveling_Count", 70, 30.0),
         ] {
             let result = assess(&sata_ssd(&[(id, name, value)], &[]), false);
             assert_eq!(result.score, Some(100.0 - used), "{name}");
+        }
+    }
+
+    #[test]
+    fn sata_ssd_common_wear_id_with_unknown_name_is_understood() {
+        // smartctl does not know every vendor's attribute name and reports
+        // `Unknown_Attribute`; the normalized value is still health left.
+        let result = assess(&sata_ssd(&[(169, "Unknown_Attribute", 94)], &[]), false);
+        assert_eq!(result.score, Some(94.0));
+        assert_eq!(result.reasons[0], "6% of rated endurance used");
+    }
+
+    #[test]
+    fn sata_ssd_unknown_name_outside_the_common_ids_is_unmapped() {
+        for id in [173, 201] {
+            let result = assess(&sata_ssd(&[(id, "Unknown_Attribute", 81)], &[]), false);
+            assert_eq!(result.tier, Tier::Unknown, "id {id}");
         }
     }
 
