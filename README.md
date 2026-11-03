@@ -119,6 +119,12 @@ history and the reasons behind the score. Press **Refresh** to poll again. It
 reads and writes the same SQLite file as the other modes, so the history is
 shared, and it does not need a terminal.
 
+The window also takes keyboard shortcuts, matching the terminal dashboard:
+<kbd>↑</kbd>/<kbd>↓</kbd> or <kbd>k</kbd>/<kbd>j</kbd> move the selection,
+<kbd>PageUp</kbd>/<kbd>PageDown</kbd> jump five drives, <kbd>Home</kbd>/<kbd>End</kbd>
+(or <kbd>g</kbd>/<kbd>G</kbd>) go to the ends, <kbd>r</kbd> refreshes and
+<kbd>Esc</kbd> closes the window.
+
 The window is built with egui and only compiles when the `gui` feature is
 enabled, which keeps builds for servers free of GUI dependencies.
 
