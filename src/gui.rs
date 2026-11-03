@@ -170,15 +170,19 @@ impl App {
         let disk = &view.reading.disk;
         let assessment = &view.reading.assessment;
         let selected = index == self.selected;
-        let fill = if selected {
-            ui.visuals().selection.bg_fill
+        // A filled selection colour put the small grey metadata on a bright
+        // background, so selection is shown with a thicker accent border and
+        // the card keeps the same subtle fill in both themes.
+        let fill = ui.visuals().faint_bg_color;
+        let stroke = if selected {
+            egui::Stroke::new(2.0, ui.visuals().selection.bg_fill)
         } else {
-            ui.visuals().faint_bg_color
+            egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
         };
         let color = tier_color(ui, assessment.tier);
         let response = egui::Frame::new()
             .fill(fill)
-            .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
+            .stroke(stroke)
             .corner_radius(egui::CornerRadius::same(6))
             .inner_margin(egui::Margin::symmetric(10, 8))
             .show(ui, |ui| {
@@ -257,7 +261,7 @@ impl App {
 
                 ui.add_space(14.0);
                 ui.label(RichText::new("Score history").strong());
-                trend_chart(ui, &view.scores());
+                trend_chart(ui, &view.score_samples());
 
                 ui.add_space(14.0);
                 ui.label(RichText::new("Why this score").strong());
@@ -346,13 +350,15 @@ fn score_color(ui: &egui::Ui, score: f64) -> Color32 {
     }
 }
 
-/// Bars, oldest on the left, each one 0-100.
-fn trend_chart(ui: &mut egui::Ui, scores: &[f64]) {
+/// Bars, oldest on the left, each one 0-100. The bars are capped in width and
+/// right-aligned so a short history does not stretch across the whole panel,
+/// and hovering one shows its score and age.
+fn trend_chart(ui: &mut egui::Ui, samples: &[(f64, i64)]) {
     let (response, painter) =
         ui.allocate_painter(egui::vec2(ui.available_width(), 96.0), egui::Sense::hover());
     let rect = response.rect;
     painter.rect_filled(rect, egui::CornerRadius::same(4), ui.visuals().extreme_bg_color);
-    if scores.is_empty() {
+    if samples.is_empty() {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -362,16 +368,56 @@ fn trend_chart(ui: &mut egui::Ui, scores: &[f64]) {
         );
         return;
     }
-    let count = scores.len() as f32;
-    let gap = 2.0;
-    let bar_width = ((rect.width() - gap * (count + 1.0)) / count).max(1.0);
-    for (index, score) in scores.iter().enumerate() {
+
+    let weak = ui.visuals().weak_text_color();
+    let plot = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 26.0, rect.top() + 4.0),
+        egui::pos2(rect.right() - 4.0, rect.bottom() - 4.0),
+    );
+    painter.text(
+        egui::pos2(rect.left() + 3.0, plot.top()),
+        egui::Align2::LEFT_TOP,
+        "100",
+        egui::FontId::proportional(10.0),
+        weak,
+    );
+    painter.text(
+        egui::pos2(rect.left() + 3.0, plot.bottom()),
+        egui::Align2::LEFT_BOTTOM,
+        "0",
+        egui::FontId::proportional(10.0),
+        weak,
+    );
+    painter.line_segment(
+        [egui::pos2(plot.left(), plot.bottom()), egui::pos2(plot.right(), plot.bottom())],
+        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+    );
+
+    let gap = 3.0;
+    let count = samples.len() as f32;
+    let bar_width = ((plot.width() - gap * (count - 1.0)) / count).clamp(2.0, 16.0);
+    let used = count * bar_width + (count - 1.0) * gap;
+    let start = (plot.right() - used).max(plot.left());
+    let hovered = response.hover_pos().and_then(|pos| {
+        if !plot.contains(pos) {
+            return None;
+        }
+        let index = ((pos.x - start) / (bar_width + gap)).floor();
+        (index >= 0.0 && (index as usize) < samples.len()).then_some(index as usize)
+    });
+    for (index, (score, _)) in samples.iter().enumerate() {
         let ratio = (score.clamp(0.0, 100.0) / 100.0) as f32;
-        let left = rect.left() + gap + index as f32 * (bar_width + gap);
+        let height = (ratio * plot.height()).max(2.0);
+        let left = start + index as f32 * (bar_width + gap);
         let bar = egui::Rect::from_min_max(
-            egui::pos2(left, rect.bottom() - 4.0 - ratio * (rect.height() - 8.0)),
-            egui::pos2(left + bar_width, rect.bottom() - 4.0),
+            egui::pos2(left, plot.bottom() - height),
+            egui::pos2(left + bar_width, plot.bottom()),
         );
         painter.rect_filled(bar, egui::CornerRadius::same(2), score_color(ui, *score));
+    }
+    if let Some(index) = hovered {
+        let (score, timestamp) = samples[index];
+        let age = now_epoch().saturating_sub(timestamp);
+        response.on_hover_text(format!("{} · {}", score_text(Some(score)), ago_text(age)));
     }
 }
