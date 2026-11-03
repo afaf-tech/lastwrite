@@ -73,27 +73,53 @@ pub fn poll(store: &mut Store) -> Result<Poll, String> {
 }
 
 pub fn render(disk: &Disk, assessment: &Assessment) -> String {
-    let score = match assessment.score {
-        Some(score) => format!("{:.0}%", score.floor()),
-        None => "n/a".to_string(),
-    };
     let temperature = match disk.temperature_c {
         Some(temperature) => format!(", {temperature}C"),
         None => String::new(),
     };
     let mut text = format!(
-        "{} ({}): {score}, {}{temperature}\n",
+        "{} ({}): {}, {}{temperature}\n",
         disk.model,
         disk.kind.label(),
+        score_text(assessment),
         assessment.tier.label()
     );
+    push_details(&mut text, disk, assessment);
+    text
+}
+
+/// Alert body for a drive over the temperature limit. The score and tier move
+/// below the headline so a hot drive cannot read as "Healthy" at first glance.
+pub fn render_hot(disk: &Disk, assessment: &Assessment, temp_limit: i64) -> String {
+    let temperature = match disk.temperature_c {
+        Some(temperature) => format!("{temperature}C"),
+        None => "?".to_string(),
+    };
+    let mut text = format!(
+        "{} ({}): {temperature}, above the {temp_limit}C limit\n  {}, {}\n",
+        disk.model,
+        disk.kind.label(),
+        score_text(assessment),
+        assessment.tier.label()
+    );
+    push_details(&mut text, disk, assessment);
+    text
+}
+
+fn score_text(assessment: &Assessment) -> String {
+    match assessment.score {
+        Some(score) => format!("{:.0}%", score.floor()),
+        None => "n/a".to_string(),
+    }
+}
+
+fn push_details(text: &mut String, disk: &Disk, assessment: &Assessment) {
     for reason in &assessment.reasons {
         text.push_str(&format!("  - {reason}\n"));
     }
     if let Some(advice) = advice(disk.kind, assessment.tier) {
         text.push_str(&format!("  {advice}\n"));
     }
-    text
 }
 
 /// Failure odds come from `backtest/` and only apply to HDDs.
@@ -109,5 +135,63 @@ pub fn advice(kind: Kind, tier: Tier) -> Option<&'static str> {
         (Kind::Hdd, Tier::Watch) => Some("About 1 in 70 drives like this fails within 60 days."),
         (_, Tier::Critical) => Some("Back up now and plan a replacement."),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn disk(kind: Kind, temperature_c: Option<i64>) -> Disk {
+        Disk {
+            device: "/dev/test".to_string(),
+            serial: "SERIAL".to_string(),
+            model: "Test Drive".to_string(),
+            firmware: None,
+            capacity_bytes: None,
+            kind,
+            temperature_c,
+            smart_passed: Some(true),
+            attributes: BTreeMap::new(),
+            attribute_names: BTreeMap::new(),
+            attribute_values: BTreeMap::new(),
+            nvme: None,
+        }
+    }
+
+    fn assessment() -> Assessment {
+        Assessment {
+            score: Some(88.0),
+            tier: Tier::Healthy,
+            reasons: vec!["12% of rated endurance used".to_string()],
+        }
+    }
+
+    #[test]
+    fn render_leads_with_score_and_tier() {
+        let text = render(&disk(Kind::SataSsd, Some(70)), &assessment());
+        assert_eq!(
+            text,
+            "Test Drive (SATA SSD): 88%, Healthy, 70C\n  - 12% of rated endurance used\n"
+        );
+    }
+
+    #[test]
+    fn hot_render_leads_with_temperature() {
+        let text = render_hot(&disk(Kind::SataSsd, Some(70)), &assessment(), 55);
+        assert_eq!(
+            text,
+            "Test Drive (SATA SSD): 70C, above the 55C limit\n  88%, Healthy\n  \
+             - 12% of rated endurance used\n"
+        );
+    }
+
+    #[test]
+    fn hot_render_keeps_advice_for_critical_drives() {
+        let mut assessment = assessment();
+        assessment.tier = Tier::Critical;
+        let text = render_hot(&disk(Kind::Hdd, Some(60)), &assessment, 55);
+        assert!(text.contains("fail within 60 days"));
     }
 }
