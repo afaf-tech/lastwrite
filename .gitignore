@@ -8,5 +8,7 @@ backtest/.venv/
 /target/
 secret.txt
 drive.json
+drive-*.json
 standby.json
+standby-*.json
 prompts/

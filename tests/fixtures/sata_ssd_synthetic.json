@@ -1,0 +1,128 @@
+{
+  "json_format_version": [1, 0],
+  "smartctl": {
+    "version": [7, 4],
+    "svn_revision": "5530",
+    "platform_info": "x86_64-linux",
+    "build_info": "(local build)",
+    "argv": ["smartctl", "-a", "-j", "-n", "standby", "-d", "sat", "/dev/sda"],
+    "exit_status": 0
+  },
+  "device": {
+    "name": "/dev/sda",
+    "info_name": "/dev/sda [SAT]",
+    "type": "sat",
+    "protocol": "ATA"
+  },
+  "model_name": "CT1000MX500SSD1",
+  "serial_number": "SYNTHETIC0001",
+  "firmware_version": "M3CR045",
+  "rotation_rate": 0,
+  "user_capacity": {
+    "blocks": 1953525168,
+    "bytes": 1000204886016
+  },
+  "logical_block_size": 512,
+  "physical_block_size": 4096,
+  "smart_status": {
+    "passed": true
+  },
+  "temperature": {
+    "current": 33
+  },
+  "ata_smart_attributes": {
+    "revision": 1,
+    "table": [
+      {
+        "id": 5,
+        "name": "Reallocated_Sector_Ct",
+        "value": 100,
+        "worst": 100,
+        "thresh": 10,
+        "when_failed": "",
+        "flags": {"value": 51, "string": "POSR-K ", "prefailure": true, "updated": false},
+        "raw": {"value": 0, "string": "0"}
+      },
+      {
+        "id": 9,
+        "name": "Power_On_Hours",
+        "value": 99,
+        "worst": 99,
+        "thresh": 0,
+        "when_failed": "",
+        "flags": {"value": 50, "string": "-OSR-- ", "prefailure": false, "updated": false},
+        "raw": {"value": 1420, "string": "1420"}
+      },
+      {
+        "id": 12,
+        "name": "Power_Cycle_Count",
+        "value": 100,
+        "worst": 100,
+        "thresh": 0,
+        "when_failed": "",
+        "flags": {"value": 50, "string": "-OSR-- ", "prefailure": false, "updated": false},
+        "raw": {"value": 318, "string": "318"}
+      },
+      {
+        "id": 194,
+        "name": "Temperature_Celsius",
+        "value": 67,
+        "worst": 44,
+        "thresh": 0,
+        "when_failed": "",
+        "flags": {"value": 34, "string": "-O---K ", "prefailure": false, "updated": false},
+        "raw": {"value": 33, "string": "33 (Min/Max 20/45)"}
+      },
+      {
+        "id": 197,
+        "name": "Current_Pending_Sector",
+        "value": 100,
+        "worst": 100,
+        "thresh": 0,
+        "when_failed": "",
+        "flags": {"value": 50, "string": "-0SR-K ", "prefailure": false, "updated": false},
+        "raw": {"value": 0, "string": "0"}
+      },
+      {
+        "id": 198,
+        "name": "Offline_Uncorrectable",
+        "value": 100,
+        "worst": 100,
+        "thresh": 0,
+        "when_failed": "",
+        "flags": {"value": 48, "string": "-----K ", "prefailure": false, "updated": false},
+        "raw": {"value": 0, "string": "0"}
+      },
+      {
+        "id": 202,
+        "name": "Percent_Lifetime_Remain",
+        "value": 88,
+        "worst": 88,
+        "thresh": 1,
+        "when_failed": "",
+        "flags": {"value": 50, "string": "-OSR-K ", "prefailure": false, "updated": false},
+        "raw": {"value": 0, "string": "0"}
+      },
+      {
+        "id": 231,
+        "name": "SSD_Life_Left",
+        "value": 88,
+        "worst": 88,
+        "thresh": 0,
+        "when_failed": "",
+        "flags": {"value": 48, "string": "-----K ", "prefailure": false, "updated": false},
+        "raw": {"value": 0, "string": "0"}
+      },
+      {
+        "id": 241,
+        "name": "Total_LBAs_Written",
+        "value": 99,
+        "worst": 99,
+        "thresh": 0,
+        "when_failed": "",
+        "flags": {"value": 50, "string": "-OSR-K ", "prefailure": false, "updated": false},
+        "raw": {"value": 61203328, "string": "61203328"}
+      }
+    ]
+  }
+}
