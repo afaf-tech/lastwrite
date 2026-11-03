@@ -59,10 +59,15 @@ enum Update {
 }
 
 pub fn run(path: PathBuf) -> Result<(), String> {
+    // Without this the window, taskbar and Dock fall back to egui's default
+    // icon, so the app would not match the icon in the README and the bundle.
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../icons/icon.png"))
+        .map_err(|e| format!("cannot load the app icon: {e}"))?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1000.0, 700.0])
-            .with_min_inner_size([720.0, 480.0]),
+            .with_min_inner_size([720.0, 480.0])
+            .with_icon(icon),
         ..Default::default()
     };
     eframe::run_native("Lastwrite", options, Box::new(move |_| Ok(Box::new(App::new(path)))))
@@ -513,6 +518,14 @@ fn trend_chart(ui: &mut egui::Ui, samples: &[(f64, i64)]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_icon_is_the_png_from_the_readme() {
+        let icon = eframe::icon_data::from_png_bytes(include_bytes!("../icons/icon.png"))
+            .expect("icons/icon.png must decode");
+        assert_eq!((icon.width, icon.height), (1024, 1024));
+        assert_eq!(icon.rgba.len(), 1024 * 1024 * 4);
+    }
 
     #[test]
     fn movement_stops_at_the_ends() {
