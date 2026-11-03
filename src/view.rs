@@ -23,6 +23,15 @@ impl DiskView {
     pub fn scores(&self) -> Vec<f64> {
         self.history.iter().filter_map(|snapshot| snapshot.score).collect()
     }
+
+    /// Scores with their timestamps, oldest first, for charts that label a
+    /// sample on hover.
+    pub fn score_samples(&self) -> Vec<(f64, i64)> {
+        self.history
+            .iter()
+            .filter_map(|snapshot| snapshot.score.map(|score| (score, snapshot.timestamp)))
+            .collect()
+    }
 }
 
 /// Polls every drive and loads its history, most at risk first.
@@ -172,5 +181,6 @@ mod tests {
             Snapshot { timestamp: 3, score: Some(80.0), temperature_c: None, worsening: false },
         ];
         assert_eq!(view.scores(), vec![100.0, 80.0]);
+        assert_eq!(view.score_samples(), vec![(100.0, 1), (80.0, 3)]);
     }
 }
