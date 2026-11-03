@@ -255,9 +255,20 @@ fn render_drives(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Constraint::Length(5),
         Constraint::Length(TREND_POINTS as u16),
     ];
+    // The trend column is a score sparkline, so the block's bottom border
+    // carries its scale: a full-height bar is 100 and an empty one is 0.
+    let legend = Line::from(Span::styled(
+        " trend: ▁ = 0   █ = 100 ",
+        Style::default().fg(Color::DarkGray),
+    ));
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title(" Drives "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Drives ")
+                .title_bottom(legend.right_aligned()),
+        )
         .row_highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::DarkGray))
         .highlight_symbol("> ");
     let mut state = TableState::default();
@@ -306,7 +317,7 @@ fn render_details(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     }
     let trend = view.trend();
     if !trend.is_empty() {
-        lines.push(Line::from(format!("Trend: {trend}")));
+        lines.push(Line::from(format!("Score trend (0-100): {trend}")));
     }
     if let Some(last) = view.history.last() {
         let age = now_epoch().saturating_sub(last.timestamp);
@@ -324,7 +335,8 @@ fn render_details(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .collect();
     if temperatures.len() > 1 {
         lines.push(Line::from(format!(
-            "Temperature trend: {}",
+            "Temperature trend ({}): {}",
+            temperature_range(&temperatures),
             scaled_sparkline(&temperatures)
         )));
     }
@@ -400,6 +412,20 @@ fn sparkline(scores: &[f64]) -> String {
         .collect()
 }
 
+/// The temperature span a scaled sparkline covers, labelled so the shape can
+/// be read as real degrees.
+fn temperature_range(values: &[f64]) -> String {
+    let start = values.len().saturating_sub(TREND_POINTS);
+    let shown = &values[start..];
+    let low = shown.iter().copied().fold(f64::MAX, f64::min);
+    let high = shown.iter().copied().fold(f64::MIN, f64::max);
+    if (high - low).abs() < 0.5 {
+        format!("{low:.0}C")
+    } else {
+        format!("{low:.0}-{high:.0}C")
+    }
+}
+
 /// Sparkline for values without a fixed range, such as temperature.
 fn scaled_sparkline(values: &[f64]) -> String {
     const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -433,6 +459,7 @@ mod tests {
     use super::*;
     use crate::score::Assessment;
     use crate::smart::{Disk, Kind};
+    use crate::store::Snapshot;
     use crate::Reading;
     use ratatui::backend::TestBackend;
     use std::collections::BTreeMap;
@@ -486,6 +513,15 @@ mod tests {
     }
 
     #[test]
+    fn temperature_range_labels_the_shown_samples() {
+        assert_eq!(temperature_range(&[35.0, 40.0]), "35-40C");
+        assert_eq!(temperature_range(&[35.0, 35.0]), "35C");
+        let mut values = vec![10.0];
+        values.extend((0..TREND_POINTS).map(|i| 30.0 + i as f64));
+        assert_eq!(temperature_range(&values), "30-41C");
+    }
+
+    #[test]
     fn selection_is_clamped() {
         assert_eq!(move_selection(0, 3, -1), 0);
         assert_eq!(move_selection(2, 3, 1), 2);
@@ -518,10 +554,15 @@ mod tests {
 
     #[test]
     fn renders_rows_and_details() {
-        let backend = TestBackend::new(120, 24);
+        let backend = TestBackend::new(120, 32);
         let mut terminal = Terminal::new(backend).unwrap();
+        let mut view = sample("SYNTHETIC DISK", Tier::Critical, Some(9.0));
+        view.history = vec![
+            Snapshot { timestamp: 1, score: Some(100.0), temperature_c: Some(35), worsening: false },
+            Snapshot { timestamp: 2, score: Some(50.0), temperature_c: Some(40), worsening: false },
+        ];
         let app = App {
-            disks: vec![sample("SYNTHETIC DISK", Tier::Critical, Some(9.0))],
+            disks: vec![view],
             selected: 0,
             status: String::new(),
             refreshing: false,
@@ -534,5 +575,10 @@ mod tests {
         assert!(text.contains("SYNTHETIC DISK"));
         assert!(text.contains("CRITICAL"));
         assert!(text.contains("test reason"));
+        // Both sparklines carry a legend: the fixed 0-100 scale for scores and
+        // the real degree range for temperature.
+        assert!(text.contains("trend: ▁ = 0"), "{text}");
+        assert!(text.contains("Score trend (0-100): █▅"), "{text}");
+        assert!(text.contains("Temperature trend (35-40C): ▁█"), "{text}");
     }
 }

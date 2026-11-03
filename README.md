@@ -94,7 +94,9 @@ Add `--db PATH` to any of these to use a different history file. By default it i
 `lastwrite/lastwrite.sqlite` in your user config directory.
 
 In the dashboard, press `r` to refresh, the arrow keys to select a drive and `q`
-to quit.
+to quit. Each drive row ends with a score sparkline; the legend under the table
+marks an empty bar as 0 and a full bar as 100, and the details panel labels the
+temperature sparkline with its degree range.
 
 Example output (sample drives):
 
