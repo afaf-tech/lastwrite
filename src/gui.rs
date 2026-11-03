@@ -19,6 +19,34 @@ use crate::view::{
 const BUSY_TICK: Duration = Duration::from_millis(100);
 /// Redraw rate when idle, so "updated 12s ago" stays right.
 const IDLE_TICK: Duration = Duration::from_secs(1);
+/// Drives skipped by PageUp and PageDown.
+const PAGE_STEP: usize = 5;
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Movement {
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    First,
+    Last,
+}
+
+/// The selection after a key press, clamped to the list.
+fn moved(selected: usize, count: usize, movement: Movement) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let last = count - 1;
+    match movement {
+        Movement::Up => selected.saturating_sub(1),
+        Movement::Down => (selected + 1).min(last),
+        Movement::PageUp => selected.saturating_sub(PAGE_STEP),
+        Movement::PageDown => (selected + PAGE_STEP).min(last),
+        Movement::First => 0,
+        Movement::Last => last,
+    }
+}
 
 enum Command {
     Refresh,
@@ -46,6 +74,8 @@ struct App {
     updates: Receiver<Update>,
     disks: Vec<DiskView>,
     selected: usize,
+    /// Scroll the selected card into view after a keyboard move.
+    scroll_to_selected: bool,
     status: String,
     refreshing: bool,
     last_refresh: Option<Instant>,
@@ -61,6 +91,7 @@ impl App {
             updates,
             disks: Vec::new(),
             selected: 0,
+            scroll_to_selected: false,
             status: String::new(),
             refreshing: false,
             last_refresh: None,
@@ -93,6 +124,48 @@ impl App {
             Update::Failed(message) => {
                 self.refreshing = false;
                 self.status = message;
+            }
+        }
+    }
+
+    /// Keyboard shortcuts mirror the terminal dashboard: arrows or j/k move,
+    /// Home/g and End/G jump, r refreshes and Esc closes.
+    fn handle_keys(&mut self, ctx: &egui::Context) {
+        let input = ctx.input(|input| {
+            let movement = if input.key_pressed(egui::Key::ArrowUp)
+                || input.key_pressed(egui::Key::K)
+            {
+                Some(Movement::Up)
+            } else if input.key_pressed(egui::Key::ArrowDown) || input.key_pressed(egui::Key::J) {
+                Some(Movement::Down)
+            } else if input.key_pressed(egui::Key::PageUp) {
+                Some(Movement::PageUp)
+            } else if input.key_pressed(egui::Key::PageDown) {
+                Some(Movement::PageDown)
+            } else if input.key_pressed(egui::Key::Home) {
+                Some(Movement::First)
+            } else if input.key_pressed(egui::Key::End) {
+                Some(Movement::Last)
+            } else if input.key_pressed(egui::Key::G) {
+                Some(if input.modifiers.shift { Movement::Last } else { Movement::First })
+            } else {
+                None
+            };
+            (movement, input.key_pressed(egui::Key::R), input.key_pressed(egui::Key::Escape))
+        });
+        let (movement, refresh, close) = input;
+        if close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if refresh {
+            self.refresh();
+        }
+        if let Some(movement) = movement {
+            let next = moved(self.selected, self.disks.len(), movement);
+            if next != self.selected {
+                self.selected = next;
+                self.scroll_to_selected = true;
             }
         }
     }
@@ -130,6 +203,9 @@ impl App {
                 if !self.status.is_empty() {
                     ui.label(RichText::new(&self.status).color(ui.visuals().error_fg_color));
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new("↑↓ select · R refresh · Esc close").small().weak());
+                });
             });
             ui.add_space(6.0);
         });
@@ -155,17 +231,28 @@ impl App {
                     return;
                 }
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    let mut selected_rect = None;
                     for index in 0..self.disks.len() {
-                        if self.card(ui, index) {
+                        let response = self.card(ui, index);
+                        if response.clicked() {
                             self.selected = index;
                         }
+                        if index == self.selected {
+                            selected_rect = Some(response.rect);
+                        }
+                    }
+                    if self.scroll_to_selected {
+                        if let Some(rect) = selected_rect {
+                            ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                        }
+                        self.scroll_to_selected = false;
                     }
                 });
             });
     }
 
-    /// One clickable row in the drive list. Returns true when clicked.
-    fn card(&self, ui: &mut egui::Ui, index: usize) -> bool {
+    /// One clickable row in the drive list.
+    fn card(&self, ui: &mut egui::Ui, index: usize) -> egui::Response {
         let view = &self.disks[index];
         let disk = &view.reading.disk;
         let assessment = &view.reading.assessment;
@@ -206,7 +293,7 @@ impl App {
             })
             .response;
         ui.add_space(6.0);
-        response.interact(egui::Sense::click()).clicked()
+        response.interact(egui::Sense::click())
     }
 
     fn details(&mut self, ui: &mut egui::Ui) {
@@ -288,6 +375,7 @@ impl eframe::App for App {
             self.apply(update);
         }
         ui.ctx().request_repaint_after(if self.refreshing { BUSY_TICK } else { IDLE_TICK });
+        self.handle_keys(ui.ctx());
         self.top_bar(ui);
         self.drive_list(ui);
         self.details(ui);
@@ -419,5 +507,32 @@ fn trend_chart(ui: &mut egui::Ui, samples: &[(f64, i64)]) {
         let (score, timestamp) = samples[index];
         let age = now_epoch().saturating_sub(timestamp);
         response.on_hover_text(format!("{} · {}", score_text(Some(score)), ago_text(age)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn movement_stops_at_the_ends() {
+        assert_eq!(moved(0, 3, Movement::Up), 0);
+        assert_eq!(moved(2, 3, Movement::Down), 2);
+        assert_eq!(moved(1, 3, Movement::Up), 0);
+        assert_eq!(moved(1, 3, Movement::Down), 2);
+    }
+
+    #[test]
+    fn page_and_jumps_clamp_to_the_list() {
+        assert_eq!(moved(0, 12, Movement::PageDown), 5);
+        assert_eq!(moved(10, 12, Movement::PageDown), 11);
+        assert_eq!(moved(3, 12, Movement::PageUp), 0);
+        assert_eq!(moved(7, 12, Movement::First), 0);
+        assert_eq!(moved(7, 12, Movement::Last), 11);
+    }
+
+    #[test]
+    fn an_empty_list_has_no_selection() {
+        assert_eq!(moved(4, 0, Movement::Down), 0);
     }
 }
