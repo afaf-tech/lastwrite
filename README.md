@@ -17,7 +17,8 @@
 Lastwrite watches the health of your hard drives and SSDs and tells you which one
 to replace next. It reads S.M.A.R.T. data through `smartctl`, turns it into a
 health score and a risk tier, keeps the history in a local SQLite file, and can
-alert you through a webhook or Telegram.
+alert you through a webhook or Telegram. On Linux it also finds SATA disks behind
+an HBA and USB enclosures that `smartctl --scan` does not list.
 
 It is a small Rust toolchain: a CLI binary with an interactive terminal dashboard
 and a background daemon, plus an optional desktop app. There is no web server, no
@@ -28,9 +29,10 @@ Docker and no database to install.
 *Desktop dashboard with sample drives. The HDD is Critical because its damage
 counters rose in the last 7 days, not just because of the score.*
 
-> **Status: early.** The scoring for HDDs and SATA SSDs has been tested on
-> recorded and simulated data but not yet on real drives. NVMe has been tested on
-> one real drive. See [Known limits](#known-limits) before relying on it.
+> **Status: early.** Detection and scoring have been run on a real Proxmox VE
+> host with a SATA SSD, a USB SSD and an NVMe drive. HDD scoring is still covered
+> only by recorded and simulated data. See [Known limits](#known-limits) before
+> relying on it.
 
 ## Why Lastwrite
 
@@ -227,8 +229,10 @@ Download `SHA256SUMS` with the archive and check it before running anything.
 
 ## Known limits
 
-- **Not yet run on real HDDs or SATA SSDs.** The code is tested on recorded NVMe
-  output and on simulated drives.
+- **Real-drive coverage is partial.** Detection and scoring have been run on a
+  real Proxmox VE host with a SATA SSD, a USB SSD and an NVMe drive, but not on a
+  real HDD. HDD rules are covered by recorded and simulated data and the
+  backtest.
 - **Silent failures are invisible.** About 18% of the drives that failed in the
   backtest showed no sign on the attributes Lastwrite watches. A healthy score is
   not a guarantee, so keep backups.
