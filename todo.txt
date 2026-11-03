@@ -41,7 +41,7 @@ Everything below only reads the drive, except step 5, which spins it down.
     score, tier, temperature, trend), most at risk first. Press r to refresh
     and q to quit; the terminal must be restored.
     SATA SSDs are scored from the normalized value of their vendor wear
-    attribute, usually 231, 233, 202 or 169. A new, healthy SATA SSD must
+    attribute, usually 231, 233, 202, 201, 173 or 169. A new, healthy SATA SSD must
     score near 100%; a score near 0% on a healthy drive is a bug, so send the
     drive.json from step 4. A drive with none of those attributes shows
     "Unknown".

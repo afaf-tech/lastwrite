@@ -148,9 +148,11 @@ fn assess_nvme(disk: &Disk, worsening: bool) -> Assessment {
 }
 
 /// Vendor SATA SSDs expose endurance under different names and IDs. The names
-/// are matched first; 231, 233, 202 and 169 are the common IDs, used when
-/// smartctl does not know the vendor's attribute name and reports
-/// `Unknown_Attribute`.
+/// are matched first; 231, 233, 202, 201, 173 and 169 are the common wear IDs,
+/// used when smartctl does not know the vendor's attribute name and reports
+/// `Unknown_Attribute` (Lite-On drives, for example, report 173 and 201 that
+/// way). Only SATA SSDs reach this function, so an unknown ID here cannot be
+/// confused with an HDD attribute.
 ///
 /// A name like `Perc_Rated_Life_Used` says what the *raw* value counts, not the
 /// normalized one. Under the SMART convention the normalized `value` is always
@@ -184,8 +186,8 @@ fn wear_used(disk: &Disk) -> Option<f64> {
         ]
         .iter()
         .any(|pattern| name.contains(pattern));
-        let unnamed_common_id =
-            (name.is_empty() || name.starts_with("unknown")) && [169, 202, 231, 233].contains(id);
+        let unnamed_common_id = (name.is_empty() || name.starts_with("unknown"))
+            && [169, 173, 201, 202, 231, 233].contains(id);
         if !named && !unnamed_common_id {
             continue;
         }
@@ -415,8 +417,24 @@ mod tests {
     }
 
     #[test]
+    fn sata_ssd_liteon_style_wear_ids_are_understood() {
+        // A real Lite-On CV8 reports 173 and 201 as unknown names, both with
+        // normalized value 81.
+        let disk = sata_ssd(
+            &[
+                (173, "Unknown_Attribute", 81),
+                (201, "Unknown_SSD_Attribute", 81),
+            ],
+            &[],
+        );
+        let result = assess(&disk, false);
+        assert_eq!((result.score, result.tier), (Some(81.0), Tier::Healthy));
+        assert_eq!(result.reasons[0], "19% of rated endurance used");
+    }
+
+    #[test]
     fn sata_ssd_unknown_name_outside_the_common_ids_is_unmapped() {
-        for id in [173, 201] {
+        for id in [171, 243] {
             let result = assess(&sata_ssd(&[(id, "Unknown_Attribute", 81)], &[]), false);
             assert_eq!(result.tier, Tier::Unknown, "id {id}");
         }
