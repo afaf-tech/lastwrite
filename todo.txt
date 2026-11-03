@@ -5,6 +5,25 @@ Use a physical machine (Linux or a Proxmox host) with an HDD or SATA SSD.
 A VM won't work: its disk is virtual and has no real SMART data.
 Everything below only reads the drive, except step 5, which spins it down.
 
+Status (2026-11-03)
+-------------------
+Lastwrite was built for Linux and run on pve-01 (Proxmox VE 9, smartmontools
+7.4) against the only disks it has, all flash:
+
+  /dev/sda    LITEON CV8-CE128-HP     SATA SSD   81% Healthy, 25C
+  /dev/sdb    TEAM T253X1240G         USB SSD    100% Healthy (STANDBY later)
+  /dev/nvme0  WD Blue SN5000 500GB    NVMe       98% Healthy, 41C
+
+Detection, scoring, the dashboard and the report were all correct, including
+the USB SSD that `smartctl --scan` does not list. Alert delivery was tested
+end to end on a Mac with a fake `smartctl`: a Critical tier, a temperature
+limit and a drive that stops answering each sent exactly one alert, while a
+sleeping drive was skipped.
+
+No rotational disk was available: pve-01 and the Mac have none, and homy-px
+and first-node-px are unreachable over the network. So the HDD half of step 4,
+all of step 5 and HDD scoring still need a machine with a real spinning disk.
+
 [ ] 1. Install the tools
     sudo apt install smartmontools hdparm
     Install Rust from https://rustup.rs (if the build fails, also: sudo apt install build-essential)
