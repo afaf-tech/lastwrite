@@ -2,6 +2,9 @@
 name = "lastwrite"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "Watch drive health and know which disk to replace next"
+repository = "https://github.com/afaf-tech/lastwrite"
 
 [[bin]]
 name = "lastwrite"

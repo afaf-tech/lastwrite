@@ -11,6 +11,7 @@
 <p align="center">
   <a href="https://github.com/afaf-tech/lastwrite/actions/workflows/ci.yml"><img src="https://github.com/afaf-tech/lastwrite/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/afaf-tech/lastwrite/actions/workflows/release.yml"><img src="https://github.com/afaf-tech/lastwrite/actions/workflows/release.yml/badge.svg" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
   <a href="#known-limits"><img src="https://img.shields.io/badge/status-early-orange" alt="Status: early"></a>
 </p>
 
@@ -253,3 +254,13 @@ Download `SHA256SUMS` with the archive and check it before running anything.
   `smartctl`.
 - **No repeat alerts.** A drive that stays Critical does not alert again until it
   recovers and gets worse again.
+
+## Contributing
+
+Bug reports and pull requests are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) has
+the commands to run and the layout of the code. Raw `smartctl` JSON contains
+serial numbers, so leave it out of issues and commits.
+
+## License
+
+Lastwrite is released under the [MIT License](LICENSE).
